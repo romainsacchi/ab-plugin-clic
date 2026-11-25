@@ -1,11 +1,11 @@
-"""Activity Browser page for selecting and importing a CLIC inventory."""
+"""Activity Browser page for selecting and importing CLIC inventories."""
 
 import bw2data as bd
 import requests
 from activity_browser.plugins import ABAbstractPage
 from qtpy import QtCore, QtWidgets
 
-from .client import ClicClient
+from .client import MAX_EXPORT_VERSIONS, ClicClient
 from .inventory import prepare_inventory, write_inventory
 
 
@@ -16,7 +16,7 @@ class ClicPage(ABAbstractPage):
     def __init__(self, *args, host, **kwargs):
         super().__init__(*args, **kwargs)
         self.host = host
-        self.versions = []
+        self.selected_versions = {}
         self.search_name = ""
         self.page_number = 1
 
@@ -29,17 +29,18 @@ class ClicPage(ABAbstractPage):
         search_bar.addWidget(self.search)
         search_bar.addWidget(search_button)
 
-        self.results = QtWidgets.QTableWidget(0, 4)
+        self.results = QtWidgets.QTableWidget(0, 5)
         self.results.setHorizontalHeaderLabels(
-            ["Inventory", "Location", "Version", "CLIC ID"]
+            ["Select", "Inventory", "Location", "Version", "CLIC ID"]
         )
         self.results.horizontalHeader().setSectionResizeMode(
-            0, QtWidgets.QHeaderView.Stretch
+            1, QtWidgets.QHeaderView.Stretch
         )
+        self.results.setColumnWidth(0, 65)
         self.results.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.results.currentCellChanged.connect(self._select_version)
+        self.results.itemChanged.connect(self._toggle_version)
 
         self.previous = QtWidgets.QPushButton("Previous")
         self.previous.clicked.connect(
@@ -51,12 +52,36 @@ class ClicPage(ABAbstractPage):
         )
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
-        self.status = QtWidgets.QLabel("Search CLIC to select an inventory.")
+        self.status = QtWidgets.QLabel("Search CLIC to find inventories.")
         self.status.setTextFormat(QtCore.Qt.PlainText)
         pagination = QtWidgets.QHBoxLayout()
         pagination.addWidget(self.status, 1)
         pagination.addWidget(self.previous)
         pagination.addWidget(self.next)
+
+        self.selection = QtWidgets.QGroupBox()
+        self.selection_list = QtWidgets.QListWidget()
+        self.selection_list.setMaximumHeight(95)
+        self.selection_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection
+        )
+        self.remove_button = QtWidgets.QPushButton("Remove selected")
+        self.remove_button.setEnabled(False)
+        self.remove_button.clicked.connect(self._remove_selected)
+        self.selection_list.itemSelectionChanged.connect(
+            lambda: self.remove_button.setEnabled(
+                bool(self.selection_list.selectedItems())
+            )
+        )
+        self.clear_button = QtWidgets.QPushButton("Clear all")
+        self.clear_button.clicked.connect(self._clear_selection)
+        selection_buttons = QtWidgets.QVBoxLayout()
+        selection_buttons.addWidget(self.remove_button)
+        selection_buttons.addWidget(self.clear_button)
+        selection_buttons.addStretch()
+        selection_layout = QtWidgets.QHBoxLayout(self.selection)
+        selection_layout.addWidget(self.selection_list, 1)
+        selection_layout.addLayout(selection_buttons)
 
         self.target_version = QtWidgets.QLineEdit("3.12")
         self.target_system = QtWidgets.QComboBox()
@@ -81,17 +106,18 @@ class ClicPage(ABAbstractPage):
         form.addRow("CLIC API token", self.token)
 
         self.import_button = QtWidgets.QPushButton("Prepare import")
-        self.import_button.setEnabled(False)
         self.import_button.clicked.connect(self._prepare)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(search_bar)
         layout.addWidget(self.results, 1)
         layout.addLayout(pagination)
+        layout.addWidget(self.selection)
         layout.addLayout(form)
         layout.addWidget(self.import_button, 0, QtCore.Qt.AlignRight)
 
         self.host.signals.project.changed.connect(self._load_databases)
         self._load_databases()
+        self._sync_selection()
 
     def _load_databases(self, *_):
         names = sorted(bd.databases)
@@ -130,35 +156,80 @@ class ClicPage(ABAbstractPage):
             return
         self.search_name = name
         self.page_number = number
-        self.versions = page["results"]
-        self.results.setRowCount(0)
-        self.results.setRowCount(len(self.versions))
-        for row, version in enumerate(self.versions):
-            for column, field in enumerate(
-                ("name", "location", "semantic_version", "id")
-            ):
-                self.results.setItem(
-                    row, column, QtWidgets.QTableWidgetItem(str(version[field]))
+        with QtCore.QSignalBlocker(self.results):
+            self.results.clearContents()
+            self.results.setRowCount(len(page["results"]))
+            for row, version in enumerate(page["results"]):
+                check = QtWidgets.QTableWidgetItem()
+                check.setData(QtCore.Qt.UserRole, version)
+                check.setCheckState(
+                    QtCore.Qt.Checked
+                    if version["id"] in self.selected_versions
+                    else QtCore.Qt.Unchecked
                 )
+                if not version["downloads_available"]:
+                    check.setFlags(check.flags() & ~QtCore.Qt.ItemIsEnabled)
+                    check.setToolTip("Export unavailable for this version")
+                self.results.setItem(row, 0, check)
+                for column, field in enumerate(
+                    ("name", "location", "semantic_version", "id"), start=1
+                ):
+                    self.results.setItem(
+                        row, column, QtWidgets.QTableWidgetItem(str(version[field]))
+                    )
         self.previous.setEnabled(bool(page["previous"]))
         self.next.setEnabled(bool(page["next"]))
         self.status.setText(f"Page {number} · {page['count']} published versions")
-        if self.versions:
-            self.results.setCurrentCell(0, 0)
-        else:
-            self.import_button.setEnabled(False)
 
-    def _select_version(self, row, *_):
-        available = (
-            0 <= row < len(self.versions) and self.versions[row]["downloads_available"]
-        )
-        self.import_button.setEnabled(available)
+    def _toggle_version(self, item):
+        if item.column() != 0:
+            return
+        version = item.data(QtCore.Qt.UserRole)
+        if item.checkState() == QtCore.Qt.Checked:
+            if len(self.selected_versions) >= MAX_EXPORT_VERSIONS:
+                self._sync_selection()
+                self._message(
+                    f"Select up to {MAX_EXPORT_VERSIONS} versions per import."
+                )
+                return
+            self.selected_versions[version["id"]] = version
+        else:
+            self.selected_versions.pop(version["id"], None)
+        self._sync_selection()
+
+    def _remove_selected(self):
+        for item in self.selection_list.selectedItems():
+            self.selected_versions.pop(item.data(QtCore.Qt.UserRole))
+        self._sync_selection()
+
+    def _clear_selection(self):
+        self.selected_versions.clear()
+        self._sync_selection()
+
+    def _sync_selection(self):
+        with QtCore.QSignalBlocker(self.results):
+            for row in range(self.results.rowCount()):
+                check = self.results.item(row, 0)
+                version_id = check.data(QtCore.Qt.UserRole)["id"]
+                checked = version_id in self.selected_versions
+                check.setCheckState(
+                    QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked
+                )
+        self.selection_list.clear()
+        for version in self.selected_versions.values():
+            item = QtWidgets.QListWidgetItem(
+                f"{version['name']} · {version['location']} · {version['semantic_version']}"
+            )
+            item.setData(QtCore.Qt.UserRole, version["id"])
+            self.selection_list.addItem(item)
+        self.selection.setTitle(f"Selected versions ({len(self.selected_versions)})")
+        self.clear_button.setEnabled(bool(self.selected_versions))
+        self.import_button.setEnabled(bool(self.selected_versions))
 
     def _prepare(self):
-        row = self.results.currentRow()
-        if not 0 <= row < len(self.versions):
+        versions = list(self.selected_versions.values())
+        if not versions:
             return
-        version = self.versions[row]
         project = bd.projects.current
         token = self.token.text().strip()
         technosphere = self.technosphere.currentText()
@@ -180,7 +251,9 @@ class ClicPage(ABAbstractPage):
 
         def prepare():
             with requests.Session() as session:
-                package = ClicClient(session).export(version["id"], target, token)
+                package = ClicClient(session).export(
+                    [version["id"] for version in versions], target, token
+                )
             return prepare_inventory(
                 package,
                 project=project,
@@ -193,7 +266,7 @@ class ClicPage(ABAbstractPage):
             [technosphere, biosphere], reason="Preparing CLIC import"
         ):
             prepared = self._operation("Prepare CLIC import", prepare)
-            if prepared is None or not self._confirm(version, prepared):
+            if prepared is None or not self._confirm(versions, prepared):
                 return
 
             # AB3 also refreshes metadata synchronously on Brightway database
@@ -215,13 +288,16 @@ class ClicPage(ABAbstractPage):
                 f"Imported {len(prepared.importer.data)} activities into {prepared.database}."
             )
 
-    def _confirm(self, version, prepared):
+    def _confirm(self, versions, prepared):
         dialog = QtWidgets.QMessageBox(self)
-        dialog.setWindowTitle("Import CLIC inventory")
+        dialog.setWindowTitle("Import from CLIC")
         dialog.setTextFormat(QtCore.Qt.PlainText)
-        dialog.setText(
-            f"Import {version['name']} ({version['semantic_version']}) into {prepared.project}?"
-        )
+        if len(versions) == 1:
+            version = versions[0]
+            subject = f"{version['name']} ({version['semantic_version']})"
+        else:
+            subject = f"{len(versions)} CLIC versions"
+        dialog.setText(f"Import {subject} into {prepared.project}?")
         details = f"{len(prepared.importer.data)} activities will be written to {prepared.database}."
         if prepared.warnings:
             details += f" CLIC reported {len(prepared.warnings)} conversion warnings."

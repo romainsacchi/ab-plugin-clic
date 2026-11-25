@@ -36,10 +36,11 @@ class ClicClientTests(unittest.TestCase):
             self.response(package),
         ]
         self.assertEqual(
-            self.client.export(42, {"family": "ecoinvent"}, "fake-token"), package
+            self.client.export([42], {"family": "ecoinvent"}, "fake-token"), package
         )
         calls = self.session.request.call_args_list
         self.assertEqual([call.args[0] for call in calls], ["POST", "GET", "GET"])
+        self.assertEqual(calls[0].kwargs["json"], {"family": "ecoinvent"})
         for call in calls:
             self.assertEqual(
                 call.kwargs["headers"]["Authorization"], "Bearer fake-token"
@@ -51,5 +52,31 @@ class ClicClientTests(unittest.TestCase):
             {"status": "succeeded", "result_url": "https://example.org/result/"}
         )
         with self.assertRaisesRegex(ClicError, "another origin"):
-            self.client.export(42, {}, "fake-token")
+            self.client.export([42], {}, "fake-token")
         self.session.request.assert_called_once()
+
+    def test_multiple_versions_share_one_export(self):
+        package = {"package": {"root_version_ids": [42, 58, 91]}}
+        self.session.request.side_effect = [
+            self.response(
+                {"status": "succeeded", "result_url": "/api/jobs/test/result/"}
+            ),
+            self.response(package),
+        ]
+        target = {"family": "ecoinvent"}
+        self.assertEqual(
+            self.client.export([91, 42, 58, 42], target, "fake-token"), package
+        )
+        post = self.session.request.call_args_list[0]
+        self.assertTrue(post.args[1].endswith("/versions/42/brightway-json-jobs/"))
+        self.assertEqual(post.kwargs["json"], {**target, "version_ids": [58, 91]})
+
+    def test_rejects_a_package_missing_a_selected_version(self):
+        self.session.request.side_effect = [
+            self.response(
+                {"status": "succeeded", "result_url": "/api/jobs/test/result/"}
+            ),
+            self.response({"package": {"root_version_ids": [42]}}),
+        ]
+        with self.assertRaisesRegex(ClicError, "different selection"):
+            self.client.export([42, 58], {}, "fake-token")

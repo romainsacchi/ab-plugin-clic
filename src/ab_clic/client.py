@@ -1,12 +1,14 @@
-"""Read published CLIC metadata and fetch an exact-version export."""
+"""Read published CLIC metadata and export selected versions together."""
 
 import time
+from collections.abc import Iterable
 from urllib.parse import urljoin, urlsplit
 
 import requests
 
 CLIC_URL = "https://clic.psi.ch"
 PAGE_SIZE = 25
+MAX_EXPORT_VERSIONS = 100
 
 
 class ClicError(RuntimeError):
@@ -24,9 +26,15 @@ class ClicClient:
             params={"name": name, "page": page, "page_size": PAGE_SIZE},
         )
 
-    def export(self, version_id: int, target: dict, token: str) -> dict:
-        path = f"/api/versions/{version_id}/brightway-json-jobs/"
-        job = self._request("POST", path, token=token, json=target)
+    def export(self, version_ids: Iterable[int], target: dict, token: str) -> dict:
+        ids = sorted(set(version_ids))
+        if not 1 <= len(ids) <= MAX_EXPORT_VERSIONS:
+            raise ClicError(
+                f"Select 1 to {MAX_EXPORT_VERSIONS} CLIC versions to export."
+            )
+        path = f"/api/versions/{ids[0]}/brightway-json-jobs/"
+        payload = {**target, "version_ids": ids[1:]} if len(ids) > 1 else target
+        job = self._request("POST", path, token=token, json=payload)
         deadline = time.monotonic() + 180
         while job["status"] in {"queued", "processing"}:
             if time.monotonic() >= deadline:
@@ -42,8 +50,11 @@ class ClicClient:
             raise ClicError(f"CLIC could not prepare this export. {detail}")
 
         package = self._request("GET", job["result_url"], token=token)
-        if package.get("package", {}).get("root_version_ids") != [version_id]:
-            raise ClicError("CLIC returned a package for a different dataset version.")
+        returned_ids = package.get("package", {}).get("root_version_ids", [])
+        if sorted(returned_ids) != ids:
+            raise ClicError(
+                "CLIC returned a package for a different selection of versions."
+            )
         return package
 
     def _request(self, method: str, path: str, *, token: str = "", **kwargs) -> dict:

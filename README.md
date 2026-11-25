@@ -12,9 +12,9 @@ python -m pip install -e .
 activity-browser
 ```
 
-Enable CLIC under **Settings → Plugins**, save, and restart. Open **Plugins → CLIC → Browse and import**. Open a project with compatible ecoinvent technosphere and biosphere databases. Search by name, select a published version, choose the local databases and export target, and provide a CLIC token with inventory download scope. The token stays in the masked input for the lifetime of the page.
+Enable CLIC under **Settings → Plugins**, save, and restart. Open **Plugins → CLIC → Browse and import**. Open a project with compatible ecoinvent technosphere and biosphere databases. Search by name and tick the boxes beside the published versions you want. The **Selected versions** list follows you across searches and pages. Choose the local databases and export target, and provide a CLIC token with inventory download scope. The token stays in the masked input for the lifetime of the page.
 
-The plugin downloads the exact version and its connected CLIC suppliers, checks links, and lets the user review conversion warnings before writing a new foreground database. A blank foreground name uses the package's suggested name. Existing databases are protected from overwrite.
+The plugin requests one export with up to 100 selected versions and their connected CLIC suppliers. CLIC includes shared suppliers once. The plugin checks links and lets you review conversion warnings before writing one new foreground database. A blank foreground name uses the package's suggested name. Existing databases are protected from overwrite.
 
 ## Feasibility
 
