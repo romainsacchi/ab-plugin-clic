@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import bw2data as bd
 from bw2io.importers.base_lci import LCIImporter
 
+from .progress import PreparationStep, ProgressCallback, ignore_progress
+
 
 @dataclass
 class PreparedInventory:
@@ -41,7 +43,12 @@ def prepare_inventory(
     technosphere: str,
     biosphere: str,
     database: str = "",
+    on_progress: ProgressCallback = ignore_progress,
 ) -> PreparedInventory:
+    on_progress(
+        PreparationStep.CHECK_PACKAGE,
+        "Checking the package and linking its activities…",
+    )
     if (package.get("schema"), package.get("schema_version")) != (
         "clic.brightway-json",
         "1.2",
@@ -69,15 +76,23 @@ def prepare_inventory(
                 raise ValueError(f"Invalid internal CLIC link in {activity['name']!r}.")
             exchange["input"] = (name, link["code"])
 
+    on_progress(
+        PreparationStep.MATCH_TECHNOSPHERE,
+        f"Matching technosphere exchanges to {technosphere}…",
+    )
     importer.match_database(
         technosphere,
         fields=["name", "reference product", "location", "unit"],
         edge_kinds=["technosphere"],
     )
+    on_progress(
+        PreparationStep.MATCH_BIOSPHERE, f"Matching biosphere exchanges to {biosphere}…"
+    )
     importer.match_database(
         biosphere, fields=["name", "categories", "unit"], edge_kinds=["biosphere"]
     )
 
+    on_progress(PreparationStep.CHECK_LINKS, "Checking for unresolved exchanges…")
     unlinked = [
         f"{activity['name']} → {exchange.get('name') or exchange['type']}"
         for activity in importer.data

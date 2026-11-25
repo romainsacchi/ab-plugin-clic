@@ -61,6 +61,7 @@ def make_package():
         for code in ("root", "helper")
     ]
     root, helper = activities
+    root["comment"] = "Published CLIC description"
     root["parameters"] = [{"name": "scale", "amount": 2}]
     root["exchanges"].extend(
         [
@@ -130,6 +131,7 @@ if __name__ == "__main__":
     write_inventory(prepared)
     assert "new" in signalled, signalled
     root = bd.Database("new").get("root")
+    assert root["comment"] == "Published CLIC description"
     assert root["parameters"][0]["amount"] == 2
     assert next(iter(root.biosphere()))["scale"] == 0.1
     assert next(iter(root.technosphere())).input.key == ("new", "helper")

@@ -6,7 +6,9 @@ from activity_browser.plugins import ABAbstractPage
 from qtpy import QtCore, QtWidgets
 
 from .client import MAX_EXPORT_VERSIONS, ClicClient
+from .details_dialog import CandidateDetails
 from .inventory import prepare_inventory, write_inventory
+from .progress_dialog import run_preparation
 
 
 class ClicPage(ABAbstractPage):
@@ -17,6 +19,7 @@ class ClicPage(ABAbstractPage):
         super().__init__(*args, **kwargs)
         self.host = host
         self.selected_versions = {}
+        self.details_dialog = None
         self.search_name = ""
         self.page_number = 1
 
@@ -41,6 +44,8 @@ class ClicPage(ABAbstractPage):
         self.results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.results.itemChanged.connect(self._toggle_version)
+        self.results.cellClicked.connect(self._show_details)
+        self.results.cellActivated.connect(self._show_details)
 
         self.previous = QtWidgets.QPushButton("Previous")
         self.previous.clicked.connect(
@@ -181,6 +186,16 @@ class ClicPage(ABAbstractPage):
         self.next.setEnabled(bool(page["next"]))
         self.status.setText(f"Page {number} · {page['count']} published versions")
 
+    def _show_details(self, row, column):
+        if column == 0:
+            return
+        version = self.results.item(row, 0).data(QtCore.Qt.UserRole)
+        if self.details_dialog is None:
+            self.details_dialog = CandidateDetails(self)
+        self.details_dialog.set_version(version)
+        self.details_dialog.show()
+        self.details_dialog.raise_()
+
     def _toggle_version(self, item):
         if item.column() != 0:
             return
@@ -249,24 +264,35 @@ class ClicPage(ABAbstractPage):
             self._message("Choose separate technosphere and biosphere databases.")
             return
 
-        def prepare():
+        def prepare(on_progress):
             with requests.Session() as session:
-                package = ClicClient(session).export(
-                    [version["id"] for version in versions], target, token
+                client = ClicClient(session)
+                package = client.export(
+                    [version["id"] for version in versions],
+                    target,
+                    token,
+                    on_progress=on_progress,
                 )
-            return prepare_inventory(
-                package,
-                project=project,
-                technosphere=technosphere,
-                biosphere=biosphere,
-                database=database,
-            )
+                client.add_descriptions(package, versions, on_progress=on_progress)
+            with self.host.safe_bw_connection():
+                return prepare_inventory(
+                    package,
+                    project=project,
+                    technosphere=technosphere,
+                    biosphere=biosphere,
+                    database=database,
+                    on_progress=on_progress,
+                )
 
         with self.host.protect_databases(
             [technosphere, biosphere], reason="Preparing CLIC import"
         ):
-            prepared = self._operation("Prepare CLIC import", prepare)
-            if prepared is None or not self._confirm(versions, prepared):
+            try:
+                prepared = run_preparation(self, prepare)
+            except Exception as exc:
+                self._message(f"Could not prepare the CLIC import.\n\n{exc}")
+                return
+            if not self._confirm(versions, prepared):
                 return
 
             # AB3 also refreshes metadata synchronously on Brightway database
