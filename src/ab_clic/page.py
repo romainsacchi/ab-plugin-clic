@@ -1,10 +1,13 @@
 """Activity Browser page for selecting and importing CLIC inventories."""
 
+from importlib.resources import files
+
 import bw2data as bd
 import requests
 from activity_browser.plugins import ABAbstractPage
-from qtpy import QtCore, QtWidgets
+from qtpy import QtCore, QtSvgWidgets, QtWidgets
 
+from .catalog_table import COLUMNS, CatalogCell, CatalogTable
 from .client import MAX_EXPORT_VERSIONS, ClicClient, has_noncommercial_license
 from .details_dialog import CandidateDetails
 from .inventory import prepare_inventory, write_inventory
@@ -17,6 +20,7 @@ SEARCH_FIELDS = (
     ("Location", "location", "Enter a location, e.g. CH"),
     ("Unit", "unit", "Enter a unit, e.g. kilogram"),
     ("Author", "author", "Enter an author name"),
+    ("Project name", "project", "Enter a project name or acronym"),
     ("Keyword", "keyword", "Enter a keyword"),
     ("Classification code", "classification_node", "Enter a code, e.g. energy/solar"),
     ("Source publication year", "publication_year", "Enter a year, e.g. 2024"),
@@ -33,7 +37,8 @@ class ClicPage(ABAbstractPage):
         self.host = host
         self.selected_versions = {}
         self.details_dialog = None
-        self.active_search = ("name", "")
+        self.active_search = None
+        self.catalog_sort = ""
         self.page_number = 1
 
         self.search_field = QtWidgets.QComboBox()
@@ -62,20 +67,15 @@ class ClicPage(ABAbstractPage):
         search_bar.addWidget(self.exclude_noncommercial)
         search_bar.addWidget(search_button)
 
-        self.results = QtWidgets.QTableWidget(0, 5)
-        self.results.setHorizontalHeaderLabels(
-            ["Select", "Inventory", "Location", "Version", "CLIC ID"]
-        )
-        self.results.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.Stretch
-        )
-        self.results.setColumnWidth(0, 65)
+        self.results = CatalogTable()
         self.results.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.results.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.results.itemChanged.connect(self._toggle_version)
         self.results.cellClicked.connect(self._show_details)
         self.results.cellActivated.connect(self._show_details)
+        self.results.name_sort_requested.connect(self._sort_inventory)
+        self.results.column_filters_requested.connect(self._filter_columns)
 
         self.previous = QtWidgets.QPushButton("Previous")
         self.previous.clicked.connect(lambda: self._browse(-1))
@@ -137,13 +137,22 @@ class ClicPage(ABAbstractPage):
 
         self.import_button = QtWidgets.QPushButton("Prepare import")
         self.import_button.clicked.connect(self._prepare)
+        logo = QtSvgWidgets.QSvgWidget()
+        mark = files("ab_clic").joinpath("assets", "clic-mark.svg")
+        logo.load(QtCore.QByteArray(mark.read_bytes()))
+        logo.setFixedSize(28, 28)
+        logo.setAccessibleName("CLIC logo")
+        footer = QtWidgets.QHBoxLayout()
+        footer.addWidget(logo)
+        footer.addStretch(1)
+        footer.addWidget(self.import_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(search_bar)
         layout.addWidget(self.results, 1)
         layout.addLayout(pagination)
         layout.addWidget(self.selection)
         layout.addLayout(form)
-        layout.addWidget(self.import_button, 0, QtCore.Qt.AlignRight)
+        layout.addLayout(footer)
 
         self.host.signals.project.changed.connect(self._load_databases)
         self._load_databases()
@@ -170,9 +179,29 @@ class ClicPage(ABAbstractPage):
         self._load_page(self.search_field.currentData(), self.search.text().strip(), 1)
 
     def _browse(self, direction):
-        self._load_page(
-            *self.active_search, self.page_number + direction, direction=direction
+        if self.active_search is not None:
+            self._load_page(
+                *self.active_search, self.page_number + direction, direction=direction
+            )
+
+    def _sort_inventory(self, sort):
+        if self.active_search is not None and not self._load_page(
+            *self.active_search, 1, sort=sort
+        ):
+            return
+        self.catalog_sort = sort
+        order = (
+            QtCore.Qt.AscendingOrder
+            if sort == "name_asc"
+            else QtCore.Qt.DescendingOrder
         )
+        self.results.set_result_sort(1, order)
+
+    def _filter_columns(self, filters):
+        if self.active_search is None or self._load_page(
+            *self.active_search, 1, column_filters=filters
+        ):
+            self.results.set_column_filters(filters)
 
     def _license_filter_changed(self, exclude):
         if exclude:
@@ -194,8 +223,13 @@ class ClicPage(ABAbstractPage):
             # The host has already displayed the worker error.
             return None
 
-    def _load_page(self, field, query, number, *, direction=None):
+    def _load_page(
+        self, field, query, number, *, direction=None, sort=None, column_filters=None
+    ):
         exclude_noncommercial = self.exclude_noncommercial.isChecked()
+        filters = (
+            self.results.column_filters if column_filters is None else column_filters
+        )
 
         def lookup():
             with requests.Session() as session:
@@ -203,19 +237,22 @@ class ClicPage(ABAbstractPage):
                     query,
                     number,
                     field=field,
+                    sort=self.catalog_sort if sort is None else sort,
                     exclude_noncommercial=exclude_noncommercial,
+                    column_filters=filters,
                     direction=direction or 1,
                 )
 
         page = self._operation("Search CLIC", lookup)
         if page is None:
-            return
-        if exclude_noncommercial and not page["results"] and direction is not None:
+            return False
+        filters_active = exclude_noncommercial or bool(filters)
+        if filters_active and not page["results"] and direction is not None:
             (self.previous if direction < 0 else self.next).setEnabled(False)
             self.status.setText(
-                "No more versions match the license filter in this direction."
+                "No more versions match the current filters in this direction."
             )
-            return
+            return True
         self.active_search = (field, query)
         self.page_number = page["page"]
         with QtCore.QSignalBlocker(self.results):
@@ -233,12 +270,10 @@ class ClicPage(ABAbstractPage):
                     check.setFlags(check.flags() & ~QtCore.Qt.ItemIsEnabled)
                     check.setToolTip("Export unavailable for this version")
                 self.results.setItem(row, 0, check)
-                for column, field in enumerate(
-                    ("name", "location", "semantic_version", "id"), start=1
-                ):
-                    self.results.setItem(
-                        row, column, QtWidgets.QTableWidgetItem(str(version[field]))
-                    )
+                for column, (key, _, _) in enumerate(COLUMNS[1:], start=1):
+                    self.results.setItem(row, column, CatalogCell(key, version[key]))
+            if sort is None:
+                self.results.apply_sort()
         if not page["results"]:
             self.previous.setEnabled(False)
             self.next.setEnabled(False)
@@ -246,7 +281,7 @@ class ClicPage(ABAbstractPage):
         else:
             self.previous.setEnabled(bool(page["previous"]))
             self.next.setEnabled(bool(page["next"]))
-            if exclude_noncommercial:
+            if filters_active:
                 self.status.setText(
                     f"Catalog page {self.page_number} · {len(page['results'])} versions shown"
                 )
@@ -254,6 +289,7 @@ class ClicPage(ABAbstractPage):
                 self.status.setText(
                     f"Page {self.page_number} · {page['count']} published versions"
                 )
+        return True
 
     def _show_details(self, row, column):
         if column == 0:

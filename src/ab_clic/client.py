@@ -2,7 +2,7 @@
 
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from urllib.parse import quote, urljoin, urlsplit
 
 import requests
@@ -25,6 +25,15 @@ def has_noncommercial_license(version: dict) -> bool:
     return (version.get("selected_license") or "").startswith("CC-BY-NC-")
 
 
+def _matches_columns(version: dict, filters: Mapping[str, tuple[str, bool]]) -> bool:
+    for field, (term, exclude) in filters.items():
+        value = str(version.get(field) or "").casefold()
+        matches = term in value if field == "name" else term == value
+        if matches == exclude:
+            return False
+    return True
+
+
 class ClicClient:
     def __init__(self, session: requests.Session):
         self.session = session
@@ -35,7 +44,9 @@ class ClicClient:
         page: int,
         *,
         field: str = "name",
+        sort: str = "",
         exclude_noncommercial: bool = False,
+        column_filters: Mapping[str, tuple[str, bool]] | None = None,
         direction: int = 1,
     ) -> dict:
         params = {"page_size": PAGE_SIZE}
@@ -46,17 +57,24 @@ class ClicClient:
             params[f"{field}_min"] = params[f"{field}_max"] = query
         elif query:
             params[field] = query
+        if sort:
+            params["sort"] = sort
+        filters = {
+            field: (term.casefold(), exclude)
+            for field, (term, exclude) in (column_filters or {}).items()
+        }
 
         while True:
             result = self._request(
                 "GET", "/api/versions/", params={**params, "page": page}
             )
-            if not exclude_noncommercial:
+            if not exclude_noncommercial and not filters:
                 return result
             result["results"] = [
                 version
                 for version in result["results"]
-                if not has_noncommercial_license(version)
+                if (not exclude_noncommercial or not has_noncommercial_license(version))
+                and _matches_columns(version, filters)
             ]
             if result["results"] or not result["next" if direction > 0 else "previous"]:
                 return result

@@ -21,3 +21,6 @@ ab_clic = "ab_clic.activate:activate"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+ab_clic = ["assets/clic-mark.svg"]

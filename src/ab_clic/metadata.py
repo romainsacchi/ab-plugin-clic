@@ -30,6 +30,13 @@ def catalog_metadata(version: dict) -> dict[str, str]:
         classification = f"{classification} ({code})"
     start = discovery.get("data_period_start_year")
     end = discovery.get("data_period_end_year")
+    projects = ", ".join(
+        dict.fromkeys(
+            name
+            for project in (discovery.get("projects") or [])
+            if (name := project.get("name") or project.get("acronym"))
+        )
+    )
     fields = {
         "Source publication": primary.get("title"),
         "Publication authors": _author_names(primary.get("authors") or []),
@@ -52,6 +59,7 @@ def catalog_metadata(version: dict) -> dict[str, str]:
             )
         ),
         "Inventory authors": _author_names(authors),
+        "Projects": projects,
         "Technology readiness level (TRL)": quality.get("technology_readiness_level"),
         "Commercial maturity": technology.get("commercial_maturity_stage_label"),
         "Reference product": version.get("reference_product"),

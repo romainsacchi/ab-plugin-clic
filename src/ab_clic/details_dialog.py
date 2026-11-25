@@ -35,6 +35,7 @@ class CandidateDetails(QtWidgets.QDialog):
             "Publication authors",
             "Publication year",
             "Inventory authors",
+            "Projects",
             "Technology readiness level (TRL)",
             "Source citation",
         ):

@@ -34,6 +34,16 @@ class ClicClientTests(unittest.TestCase):
         )
         self.assertNotIn("name", self.session.request.call_args.kwargs["params"])
 
+    def test_project_search_sends_the_requested_catalog_sort(self):
+        self.session.request.return_value = self.response({"results": []})
+        self.client.search_versions(
+            "Inventory project", 2, field="project", sort="name_desc"
+        )
+        request = self.session.request.call_args.kwargs["params"]
+        self.assertEqual(request["project"], "Inventory project")
+        self.assertEqual(request["sort"], "name_desc")
+        self.assertEqual(request["page"], 2)
+
     def test_publication_year_search_uses_an_exact_year_range(self):
         self.session.request.return_value = self.response({"results": []})
         self.client.search_versions("2024", 1, field="publication_year")
@@ -69,6 +79,40 @@ class ClicClientTests(unittest.TestCase):
                 for call in self.session.request.call_args_list
             ],
             [2, 1],
+        )
+
+    def test_column_filters_combine_and_skip_nonmatching_pages(self):
+        visible = {"name": "Solar electricity", "location": "CH", "id": 32}
+        wrong_location = {**visible, "id": 29, "location": "CHE"}
+        excluded_id = {**visible, "id": 31}
+        wrong_name = {**visible, "id": 30, "name": "Wind electricity"}
+        self.session.request.side_effect = [
+            self.response(
+                {
+                    "page": 1,
+                    "next": "next-url",
+                    "results": [wrong_location, excluded_id],
+                }
+            ),
+            self.response({"page": 2, "next": None, "results": [visible, wrong_name]}),
+        ]
+        result = self.client.search_versions(
+            "electricity",
+            1,
+            column_filters={
+                "name": ("SOLAR", False),
+                "location": ("ch", False),
+                "id": ("31", True),
+            },
+        )
+        self.assertEqual(result["results"], [visible])
+        self.assertEqual(result["page"], 2)
+        self.assertEqual(
+            [
+                call.kwargs["params"]["page"]
+                for call in self.session.request.call_args_list
+            ],
+            [1, 2],
         )
 
     @patch("ab_clic.client.time.sleep")
