@@ -41,6 +41,6 @@ python -m unittest discover -s tests -v
 
 The suite uses a synthetic Brightway project and simulated CLIC export responses to exercise import without using an account token or licensed background data.
 
-The first macOS smoke test verified entry-point activation, opening the CLIC page through the real AB menu, import of two synthetic activities, and the subsequent AB database event and metadata refresh. The live anonymous catalog returned published versions. A live authenticated export, a real ecoinvent import, and standalone installation still need validation.
+The macOS Activity Browser smoke test verified project-aware suggestions, a saved export resumed without a second submission, the dependency and license review, exact-version links alongside the latest-version catalog, a confirmed write to an isolated project, and the resulting **Already imported** indicator. A live authenticated export for CLIC version `6435` linked against an ecoinvent 3.12 cutoff project with zero unresolved exchanges. The live check opened the project in read-only mode. Standalone installation remains unverified.
 
 [AB plugin API](https://github.com/LCA-ActivityBrowser/activity-browser/blob/plugins/docs/plugins/api-reference.md) · [CLIC API](https://clic.psi.ch/api/docs/)
