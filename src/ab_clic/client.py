@@ -7,11 +7,13 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import requests
 
+from .metadata import inventory_comment
 from .progress import PreparationStep, ProgressCallback, ignore_progress
 
 CLIC_URL = "https://clic.psi.ch"
 PAGE_SIZE = 25
 MAX_EXPORT_VERSIONS = 100
+YEAR_FIELDS = {"publication_year", "inventory_reference_year"}
 logger = logging.getLogger(__name__)
 
 
@@ -19,16 +21,46 @@ class ClicError(RuntimeError):
     """A CLIC operation could not be completed."""
 
 
+def has_noncommercial_license(version: dict) -> bool:
+    return (version.get("selected_license") or "").startswith("CC-BY-NC-")
+
+
 class ClicClient:
     def __init__(self, session: requests.Session):
         self.session = session
 
-    def search_versions(self, name: str, page: int) -> dict:
-        return self._request(
-            "GET",
-            "/api/versions/",
-            params={"name": name, "page": page, "page_size": PAGE_SIZE},
-        )
+    def search_versions(
+        self,
+        query: str,
+        page: int,
+        *,
+        field: str = "name",
+        exclude_noncommercial: bool = False,
+        direction: int = 1,
+    ) -> dict:
+        params = {"page_size": PAGE_SIZE}
+        if query and field in YEAR_FIELDS:
+            query = query.lstrip("0")
+            if len(query) > 4 or not query.isascii() or not query.isdecimal():
+                raise ClicError("Enter a year between 1 and 9999.")
+            params[f"{field}_min"] = params[f"{field}_max"] = query
+        elif query:
+            params[field] = query
+
+        while True:
+            result = self._request(
+                "GET", "/api/versions/", params={**params, "page": page}
+            )
+            if not exclude_noncommercial:
+                return result
+            result["results"] = [
+                version
+                for version in result["results"]
+                if not has_noncommercial_license(version)
+            ]
+            if result["results"] or not result["next" if direction > 0 else "previous"]:
+                return result
+            page = result["page"] + direction
 
     def export(
         self,
@@ -84,54 +116,58 @@ class ClicClient:
             )
         return package
 
-    def add_descriptions(
+    def add_inventory_metadata(
         self,
         package: dict,
         selected_versions: Iterable[dict],
         *,
         on_progress: ProgressCallback = ignore_progress,
     ) -> None:
-        """Put exact published descriptions in Brightway's activity comment field."""
-        on_progress(
-            PreparationStep.READ_DESCRIPTIONS, "Reading published CLIC descriptions…"
-        )
-        descriptions = {
-            (version["dataset_slug"], version["semantic_version"]): version[
-                "description"
-            ]
+        """Add exact-version descriptions and metadata to Brightway activity comments."""
+        on_progress(PreparationStep.READ_METADATA, "Reading published CLIC metadata…")
+        records = {
+            (version["dataset_slug"], version["semantic_version"]): version
             for version in selected_versions
-            if "dataset_slug" in version and "description" in version
+            if "dataset_slug" in version
         }
+        activities = []
         by_slug = {}
         for activity in package.get("activities", []):
             provenance = activity.get("provenance") or {}
             slug = provenance.get("dataset_slug")
             version = provenance.get("semantic_version")
-            if not slug or not version or activity.get("comment"):
+            if not slug or not version:
                 continue
-            if (slug, version) in descriptions:
-                if description := descriptions[slug, version]:
-                    activity["comment"] = description
-            else:
-                by_slug.setdefault(slug, []).append((version, activity))
+            identity = (slug, version)
+            activities.append((identity, activity))
+            if identity not in records:
+                by_slug.setdefault(slug, set()).add(version)
 
-        for number, (slug, activities) in enumerate(by_slug.items(), start=1):
+        for number, (slug, versions) in enumerate(by_slug.items(), start=1):
             on_progress(
-                PreparationStep.READ_DESCRIPTIONS,
-                f"Reading published CLIC descriptions ({number} of {len(by_slug)} catalog records)…",
+                PreparationStep.READ_METADATA,
+                f"Reading published CLIC metadata ({number} of {len(by_slug)} catalog records)…",
             )
             try:
                 dataset = self._request("GET", f"/api/datasets/{quote(slug, safe='')}/")
             except ClicError as exc:
-                logger.warning("Could not read CLIC descriptions for %s: %s", slug, exc)
+                logger.warning("Could not read CLIC metadata for %s: %s", slug, exc)
                 continue
-            published_descriptions = {
-                version["semantic_version"]: version.get("description")
-                for version in dataset.get("published_versions", [])
-            }
-            for version, activity in activities:
-                if description := published_descriptions.get(version):
-                    activity["comment"] = description
+            records.update(
+                {
+                    (slug, version["semantic_version"]): version
+                    for version in dataset.get("published_versions", [])
+                    if version["semantic_version"] in versions
+                }
+            )
+
+        for identity, activity in activities:
+            if identity in records:
+                comment = inventory_comment(
+                    records[identity], activity.get("comment") or ""
+                )
+                if comment:
+                    activity["comment"] = comment
 
     def _request(self, method: str, path: str, *, token: str = "", **kwargs) -> dict:
         url = urljoin(CLIC_URL, path)

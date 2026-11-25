@@ -26,6 +26,51 @@ class ClicClientTests(unittest.TestCase):
         self.assertEqual(request.kwargs["params"]["page"], 2)
         self.assertEqual(request.kwargs["headers"], {})
 
+    def test_search_uses_the_selected_field(self):
+        self.session.request.return_value = self.response({"results": []})
+        self.client.search_versions("Krogh", 1, field="author")
+        self.assertEqual(
+            self.session.request.call_args.kwargs["params"]["author"], "Krogh"
+        )
+        self.assertNotIn("name", self.session.request.call_args.kwargs["params"])
+
+    def test_publication_year_search_uses_an_exact_year_range(self):
+        self.session.request.return_value = self.response({"results": []})
+        self.client.search_versions("2024", 1, field="publication_year")
+        params = self.session.request.call_args.kwargs["params"]
+        self.assertEqual(params["publication_year_min"], "2024")
+        self.assertEqual(params["publication_year_max"], "2024")
+
+    def test_license_filter_skips_pages_without_matching_versions(self):
+        noncommercial = [
+            {"selected_license": f"CC-BY-NC-{suffix}"}
+            for suffix in ("3.0", "4.0", "SA-4.0", "ND-4.0")
+        ]
+        visible = [
+            {"selected_license": "CC-BY-4.0"},
+            {"selected_license": "UNDISCLOSED"},
+        ]
+        self.session.request.side_effect = [
+            self.response(
+                {"page": 2, "previous": "previous-url", "results": noncommercial}
+            ),
+            self.response(
+                {"page": 1, "previous": None, "results": [*visible, *noncommercial]}
+            ),
+        ]
+        result = self.client.search_versions(
+            "solar", 2, exclude_noncommercial=True, direction=-1
+        )
+        self.assertEqual(result["results"], visible)
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(
+            [
+                call.kwargs["params"]["page"]
+                for call in self.session.request.call_args_list
+            ],
+            [2, 1],
+        )
+
     @patch("ab_clic.client.time.sleep")
     def test_async_export_retrieves_the_requested_version(self, _sleep):
         package = {"package": {"root_version_ids": [42]}}
@@ -128,20 +173,44 @@ class ClicClientTests(unittest.TestCase):
                 ]
             }
         )
-        self.client.add_descriptions(
+        self.client.add_inventory_metadata(
             package,
             [
                 {
                     "dataset_slug": "root",
                     "semantic_version": "1.0.0",
                     "description": "Root description",
+                    "authors": [{"name": "Inventory Author"}],
+                    "quality_assessment": {"technology_readiness_level": 7},
+                    "discovery_metadata": {
+                        "publications": [
+                            {
+                                "relation": "primary_source",
+                                "title": "Source Title",
+                                "publication_year": 2024,
+                                "authors": [{"name": "Publication Author"}],
+                            }
+                        ]
+                    },
+                },
+                {
+                    "dataset_slug": "other",
+                    "semantic_version": "1.0.0",
+                    "description": "Catalog text",
                 },
             ],
         )
-        self.assertEqual(root["comment"], "Root description")
-        self.assertEqual(supplier["comment"], "Supplier description")
+        self.assertTrue(root["comment"].startswith("Root description\n\n"))
+        self.assertIn("Source publication — Source Title", root["comment"])
+        self.assertIn("Publication year — 2024", root["comment"])
+        self.assertIn("Publication authors — Publication Author", root["comment"])
+        self.assertIn("Inventory authors — Inventory Author", root["comment"])
+        self.assertIn("Technology readiness level (TRL) — 7", root["comment"])
+        self.assertTrue(supplier["comment"].startswith("Supplier description\n\n"))
         self.assertNotIn("comment", supplier_other)
-        self.assertEqual(existing["comment"], "Original export comment")
+        self.assertTrue(
+            existing["comment"].startswith("Original export comment\n\nCatalog text")
+        )
         self.assertNotIn("comment", helper)
         self.session.request.assert_called_once()
         self.assertEqual(

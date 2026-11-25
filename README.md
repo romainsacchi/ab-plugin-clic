@@ -12,11 +12,13 @@ python -m pip install -e .
 activity-browser
 ```
 
-Enable CLIC under **Settings → Plugins**, save, and restart. Open **Plugins → CLIC → Browse and import**. Open a project with compatible ecoinvent technosphere and biosphere databases. Search by name and click a result name to preview its description and metadata. Tick the boxes beside the versions you want. The **Selected versions** list follows you across searches and pages. Choose the local databases and export target, and provide a CLIC token with inventory download scope. The token stays in the masked input for the lifetime of the page.
+Enable CLIC under **Settings → Plugins**, save, and restart. Open **Plugins → CLIC → Browse and import**. Open a project with compatible ecoinvent technosphere and biosphere databases. Use the search dropdown to look up versions by name, reference product, location, unit, author, keyword, classification code, source publication year, or inventory reference year. **Exclude non-commercial licenses** hides versions with a Creative Commons NonCommercial license and removes those versions from the current selection. Versions with undisclosed licenses stay visible. Click a result name to preview its metadata. Tick the boxes beside the versions you want. The **Selected versions** list follows you across searches and pages. [CLIC license guide](https://clic.psi.ch/licenses/)
+
+Choose the local databases and export target. Use **Get your token** to open your CLIC profile and create a token with inventory download access. The plugin stores the token in the system credential store and restores it on startup. Use **Forget token** to remove it from the credential store. If the system credential store is unavailable, the token can still be used for the current session.
 
 The plugin requests one export with up to 100 selected versions and their connected CLIC suppliers. CLIC includes shared suppliers once. The plugin checks links and lets you review conversion warnings before writing one new foreground database. A blank foreground name uses the package's suggested name. Existing databases are protected from overwrite.
 
-**Prepare import** shows the current step and a progress bar that advances by step. After import, the activity's **Description** tab shows the published description for that exact CLIC version when the catalog provides one. For activities that already have an export comment, the plugin uses that comment.
+**Prepare import** shows the current step and a progress bar that advances by step. The **Description** tab retains any export comment and adds the CLIC description and published metadata for that exact version, including the source publication, publication authors and year, inventory authors, and technology readiness level where provided.
 
 ## Feasibility
 

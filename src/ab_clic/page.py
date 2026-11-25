@@ -5,10 +5,23 @@ import requests
 from activity_browser.plugins import ABAbstractPage
 from qtpy import QtCore, QtWidgets
 
-from .client import MAX_EXPORT_VERSIONS, ClicClient
+from .client import MAX_EXPORT_VERSIONS, ClicClient, has_noncommercial_license
 from .details_dialog import CandidateDetails
 from .inventory import prepare_inventory, write_inventory
 from .progress_dialog import run_preparation
+from .token_entry import TokenEntry
+
+SEARCH_FIELDS = (
+    ("Dataset name", "name", "Search by dataset name"),
+    ("Reference product", "reference_product", "Enter a reference product"),
+    ("Location", "location", "Enter a location, e.g. CH"),
+    ("Unit", "unit", "Enter a unit, e.g. kilogram"),
+    ("Author", "author", "Enter an author name"),
+    ("Keyword", "keyword", "Enter a keyword"),
+    ("Classification code", "classification_node", "Enter a code, e.g. energy/solar"),
+    ("Source publication year", "publication_year", "Enter a year, e.g. 2024"),
+    ("Inventory reference year", "inventory_reference_year", "Enter a year, e.g. 2024"),
+)
 
 
 class ClicPage(ABAbstractPage):
@@ -20,16 +33,33 @@ class ClicPage(ABAbstractPage):
         self.host = host
         self.selected_versions = {}
         self.details_dialog = None
-        self.search_name = ""
+        self.active_search = ("name", "")
         self.page_number = 1
 
+        self.search_field = QtWidgets.QComboBox()
+        self.search_field.setAccessibleName("Search field")
+        for label, field, _placeholder in SEARCH_FIELDS:
+            self.search_field.addItem(label, field)
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText("Search published inventories by name")
+        self.search.setPlaceholderText(SEARCH_FIELDS[0][2])
+        self.search_field.currentIndexChanged.connect(
+            lambda index: self.search.setPlaceholderText(SEARCH_FIELDS[index][2])
+        )
         self.search.returnPressed.connect(self._search)
         search_button = QtWidgets.QPushButton("Search")
         search_button.clicked.connect(self._search)
+        self.exclude_noncommercial = QtWidgets.QCheckBox(
+            "Exclude non-commercial licenses"
+        )
+        self.exclude_noncommercial.setToolTip(
+            "Hide versions with a Creative Commons NonCommercial license. "
+            "Undisclosed licenses stay visible."
+        )
+        self.exclude_noncommercial.toggled.connect(self._license_filter_changed)
         search_bar = QtWidgets.QHBoxLayout()
-        search_bar.addWidget(self.search)
+        search_bar.addWidget(self.search_field)
+        search_bar.addWidget(self.search, 1)
+        search_bar.addWidget(self.exclude_noncommercial)
         search_bar.addWidget(search_button)
 
         self.results = QtWidgets.QTableWidget(0, 5)
@@ -48,13 +78,9 @@ class ClicPage(ABAbstractPage):
         self.results.cellActivated.connect(self._show_details)
 
         self.previous = QtWidgets.QPushButton("Previous")
-        self.previous.clicked.connect(
-            lambda: self._load_page(self.search_name, self.page_number - 1)
-        )
+        self.previous.clicked.connect(lambda: self._browse(-1))
         self.next = QtWidgets.QPushButton("Next")
-        self.next.clicked.connect(
-            lambda: self._load_page(self.search_name, self.page_number + 1)
-        )
+        self.next.clicked.connect(lambda: self._browse(1))
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
         self.status = QtWidgets.QLabel("Search CLIC to find inventories.")
@@ -100,8 +126,7 @@ class ClicPage(ABAbstractPage):
         self.biosphere = QtWidgets.QComboBox()
         self.database = QtWidgets.QLineEdit()
         self.database.setPlaceholderText("Use the CLIC package name")
-        self.token = QtWidgets.QLineEdit()
-        self.token.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.token = TokenEntry()
         form = QtWidgets.QFormLayout()
         form.addRow("ecoinvent version", self.target_version)
         form.addRow("ecoinvent system model", self.target_system)
@@ -142,7 +167,25 @@ class ClicPage(ABAbstractPage):
         super().showEvent(event)
 
     def _search(self):
-        self._load_page(self.search.text().strip(), 1)
+        self._load_page(self.search_field.currentData(), self.search.text().strip(), 1)
+
+    def _browse(self, direction):
+        self._load_page(
+            *self.active_search, self.page_number + direction, direction=direction
+        )
+
+    def _license_filter_changed(self, exclude):
+        if exclude:
+            self.selected_versions = {
+                version_id: version
+                for version_id, version in self.selected_versions.items()
+                if not has_noncommercial_license(version)
+            }
+        self.results.setRowCount(0)
+        self.previous.setEnabled(False)
+        self.next.setEnabled(False)
+        self._sync_selection()
+        self._search()
 
     def _operation(self, title, func):
         try:
@@ -151,16 +194,30 @@ class ClicPage(ABAbstractPage):
             # The host has already displayed the worker error.
             return None
 
-    def _load_page(self, name, number):
+    def _load_page(self, field, query, number, *, direction=None):
+        exclude_noncommercial = self.exclude_noncommercial.isChecked()
+
         def lookup():
             with requests.Session() as session:
-                return ClicClient(session).search_versions(name, number)
+                return ClicClient(session).search_versions(
+                    query,
+                    number,
+                    field=field,
+                    exclude_noncommercial=exclude_noncommercial,
+                    direction=direction or 1,
+                )
 
         page = self._operation("Search CLIC", lookup)
         if page is None:
             return
-        self.search_name = name
-        self.page_number = number
+        if exclude_noncommercial and not page["results"] and direction is not None:
+            (self.previous if direction < 0 else self.next).setEnabled(False)
+            self.status.setText(
+                "No more versions match the license filter in this direction."
+            )
+            return
+        self.active_search = (field, query)
+        self.page_number = page["page"]
         with QtCore.QSignalBlocker(self.results):
             self.results.clearContents()
             self.results.setRowCount(len(page["results"]))
@@ -182,9 +239,21 @@ class ClicPage(ABAbstractPage):
                     self.results.setItem(
                         row, column, QtWidgets.QTableWidgetItem(str(version[field]))
                     )
-        self.previous.setEnabled(bool(page["previous"]))
-        self.next.setEnabled(bool(page["next"]))
-        self.status.setText(f"Page {number} · {page['count']} published versions")
+        if not page["results"]:
+            self.previous.setEnabled(False)
+            self.next.setEnabled(False)
+            self.status.setText("No published versions match your search.")
+        else:
+            self.previous.setEnabled(bool(page["previous"]))
+            self.next.setEnabled(bool(page["next"]))
+            if exclude_noncommercial:
+                self.status.setText(
+                    f"Catalog page {self.page_number} · {len(page['results'])} versions shown"
+                )
+            else:
+                self.status.setText(
+                    f"Page {self.page_number} · {page['count']} published versions"
+                )
 
     def _show_details(self, row, column):
         if column == 0:
@@ -263,6 +332,7 @@ class ClicPage(ABAbstractPage):
         if technosphere == biosphere:
             self._message("Choose separate technosphere and biosphere databases.")
             return
+        self.token.remember()
 
         def prepare(on_progress):
             with requests.Session() as session:
@@ -273,7 +343,9 @@ class ClicPage(ABAbstractPage):
                     token,
                     on_progress=on_progress,
                 )
-                client.add_descriptions(package, versions, on_progress=on_progress)
+                client.add_inventory_metadata(
+                    package, versions, on_progress=on_progress
+                )
             with self.host.safe_bw_connection():
                 return prepare_inventory(
                     package,

@@ -2,6 +2,8 @@
 
 from qtpy import QtCore, QtWidgets
 
+from .metadata import catalog_metadata
+
 
 class CandidateDetails(QtWidgets.QDialog):
     def __init__(self, parent):
@@ -20,23 +22,28 @@ class CandidateDetails(QtWidgets.QDialog):
         self.form = QtWidgets.QFormLayout()
         self.form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
         self.fields = {}
-        for key, title in (
-            ("semantic_version", "Version"),
-            ("reference_product", "Reference product"),
-            ("location", "Location"),
-            ("unit", "Unit"),
-            ("classification_label", "Classification"),
-            ("selected_license_label", "License"),
-            ("published_at", "Published"),
-            ("background", "Source background"),
-            ("original_citation", "Citation"),
+        for title in (
+            "CLIC version",
+            "Reference product",
+            "Location",
+            "Unit",
+            "Classification",
+            "License",
+            "Published on CLIC",
+            "Source background",
+            "Source publication",
+            "Publication authors",
+            "Publication year",
+            "Inventory authors",
+            "Technology readiness level (TRL)",
+            "Source citation",
         ):
             value = QtWidgets.QLabel()
             value.setTextFormat(QtCore.Qt.PlainText)
             value.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             value.setWordWrap(True)
             self.form.addRow(title, value)
-            self.fields[key] = value
+            self.fields[title] = value
 
         self.description = QtWidgets.QPlainTextEdit()
         self.description.setReadOnly(True)
@@ -56,16 +63,7 @@ class CandidateDetails(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
     def set_version(self, version):
-        background = (version.get("background_context") or {}).get("technosphere") or {}
-        values = {
-            **version,
-            "published_at": (version.get("published_at") or "")[:10],
-            "background": " ".join(
-                background[field]
-                for field in ("family", "version", "system_model")
-                if background.get(field)
-            ),
-        }
+        values = catalog_metadata(version)
         self.heading.setText(version["name"])
         self.description.setPlainText(version.get("description") or "")
         for key, label in self.fields.items():
