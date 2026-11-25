@@ -1,9 +1,10 @@
 import unittest
+from threading import Event
 from unittest.mock import Mock, patch
 
 import requests
 
-from ab_clic.client import ClicClient, ClicError
+from ab_clic.client import ClicClient, ClicError, ExportDeferred
 from ab_clic.progress import PreparationStep
 
 
@@ -60,6 +61,51 @@ class ClicClientTests(unittest.TestCase):
         result = self.client.search_datasets("", 1)
         self.assertEqual(result["results"], [latest, other])
         self.assertEqual(result["count"], 2)
+
+    def test_clic_links_select_the_latest_or_the_explicit_published_version(self):
+        first = {"id": 42, "dataset_slug": "solar", "semantic_version": "1.0.0"}
+        latest = {"id": 91, "dataset_slug": "solar", "semantic_version": "2.0.0"}
+        dataset = {
+            "latest_published_version": latest,
+            "published_versions": [latest, first],
+        }
+        self.session.request.side_effect = [
+            self.response(dataset),
+            self.response(dataset),
+            self.response(first),
+        ]
+        self.assertEqual(
+            self.client.dataset_from_link("https://clic.psi.ch/datasets/solar/"), latest
+        )
+        self.assertEqual(
+            self.client.dataset_from_link(
+                "https://clic.psi.ch/datasets/solar/versions/1.0.0/#details"
+            ),
+            first,
+        )
+        self.assertEqual(
+            self.client.dataset_from_link("https://clic.psi.ch/api/versions/42/"), first
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["headers"] == {}
+                for call in self.session.request.call_args_list
+            )
+        )
+
+    def test_clic_links_reject_external_origins_and_missing_versions(self):
+        with self.assertRaises(ClicError):
+            self.client.dataset_from_link("https://clic.psi.ch.example/datasets/solar/")
+        self.session.request.assert_not_called()
+        self.session.request.return_value = self.response(
+            {"published_versions": [{"semantic_version": "2.0.0"}]}
+        )
+        with self.assertRaisesRegex(
+            ClicError, "Published version 1.0.0 is unavailable"
+        ):
+            self.client.dataset_from_link(
+                "https://clic.psi.ch/datasets/solar/versions/1.0.0/"
+            )
 
     def test_publication_year_search_uses_an_exact_year_range(self):
         self.session.request.return_value = self.response({"results": []})
@@ -181,6 +227,42 @@ class ClicClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ClicError, "another origin"):
             self.client.export([42], {}, "fake-token")
         self.session.request.assert_called_once()
+
+    def test_deferring_and_resuming_an_export_reuses_the_job(self):
+        status_url = "https://clic.psi.ch/api/brightway-json-jobs/abc/"
+        package = {"package": {"root_version_ids": [42]}}
+        self.session.request.side_effect = [
+            self.response({"status": "queued", "status_url": status_url}, 202),
+            self.response(
+                {"status": "succeeded", "result_url": status_url + "result/"}
+            ),
+            self.response(package),
+        ]
+        saved = []
+        stop = Event()
+
+        def progress(step, _message):
+            if step == PreparationStep.WAIT_FOR_EXPORT:
+                self.assertEqual(saved, [status_url])
+                stop.set()
+
+        with self.assertRaises(ExportDeferred):
+            self.client.export(
+                [42],
+                {},
+                "fake-token",
+                on_job=saved.append,
+                on_progress=progress,
+                stop=stop,
+            )
+        self.assertEqual(
+            self.client.export([42], {}, "fake-token", status_url=saved[0]), package
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.session.request.call_args_list],
+            ["POST", "GET", "GET"],
+        )
+        self.assertEqual(self.session.request.call_args_list[1].args[1], status_url)
 
     def test_multiple_versions_share_one_export(self):
         package = {"package": {"root_version_ids": [42, 58, 91]}}

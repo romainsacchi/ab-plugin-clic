@@ -5,11 +5,27 @@ import requests
 from activity_browser.plugins import ABAbstractPage
 from qtpy import QtCore, QtWidgets
 
+from .background import choose_target, suggest_backgrounds
 from .catalog_table import COLUMNS, CatalogCell, CatalogTable
-from .client import MAX_EXPORT_VERSIONS, ClicClient, has_noncommercial_license
-from .details_dialog import CandidateDetails
-from .inventory import prepare_inventory, write_inventory
+from .client import (
+    MAX_EXPORT_VERSIONS,
+    ClicClient,
+    ExportDeferred,
+    ExportRejected,
+    has_noncommercial_license,
+)
+from .details_panel import CandidateDetails
+from .inventory import check_project, prepare_inventory, write_inventory
+from .pending import (
+    ImportPlan,
+    PendingExport,
+    pending_exports,
+    remove_pending,
+    save_pending,
+)
 from .progress_dialog import run_preparation
+from .records import imported_versions
+from .review import ImportReview
 from .token_entry import TokenEntry
 
 SEARCH_FIELDS = (
@@ -34,9 +50,12 @@ class ClicPage(ABAbstractPage):
         super().__init__(*args, **kwargs)
         self.host = host
         self.selected_versions = {}
-        self.details_dialog = None
+        self.previewed_version = None
         self.active_search = None
         self.page_number = 1
+        self.background_project = None
+        self.background_suggestions = {}
+        self.imported = {}
 
         self.search_field = QtWidgets.QComboBox()
         self.search_field.setAccessibleName("Search field")
@@ -50,6 +69,8 @@ class ClicPage(ABAbstractPage):
         self.search.returnPressed.connect(self._search)
         search_button = QtWidgets.QPushButton("Search")
         search_button.clicked.connect(self._search)
+        paste_link = QtWidgets.QPushButton("Paste CLIC link")
+        paste_link.clicked.connect(self._paste_link)
         self.exclude_noncommercial = QtWidgets.QCheckBox(
             "Exclude non-commercial licenses"
         )
@@ -63,6 +84,7 @@ class ClicPage(ABAbstractPage):
         search_bar.addWidget(self.search, 1)
         search_bar.addWidget(self.exclude_noncommercial)
         search_bar.addWidget(search_button)
+        search_bar.addWidget(paste_link)
 
         self.results = CatalogTable()
         self.results.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -72,6 +94,15 @@ class ClicPage(ABAbstractPage):
         self.results.cellClicked.connect(self._show_details)
         self.results.cellActivated.connect(self._show_details)
         self.results.column_filters_requested.connect(self._filter_columns)
+        self.details = CandidateDetails(self)
+        self.details.select_button.clicked.connect(self._select_preview)
+        self.catalog_preview = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.catalog_preview.addWidget(self.results)
+        self.catalog_preview.addWidget(self.details)
+        self.catalog_preview.setStretchFactor(0, 3)
+        self.catalog_preview.setStretchFactor(1, 2)
+        self.catalog_preview.setChildrenCollapsible(False)
+        self.details.hide()
 
         self.previous = QtWidgets.QPushButton("Previous")
         self.previous.clicked.connect(lambda: self._browse(-1))
@@ -110,16 +141,29 @@ class ClicPage(ABAbstractPage):
         selection_layout.addWidget(self.selection_list, 1)
         selection_layout.addLayout(selection_buttons)
 
-        self.target_version = QtWidgets.QLineEdit("3.12")
+        self.target_version = QtWidgets.QLineEdit()
+        self.target_version.setPlaceholderText("e.g. 3.12")
         self.target_system = QtWidgets.QComboBox()
         for label, code in [
+            ("Select a system model", None),
             ("Cutoff", "cutoff"),
-            ("APOS", "apos"),
             ("Consequential", "consequential"),
         ]:
             self.target_system.addItem(label, code)
         self.technosphere = QtWidgets.QComboBox()
         self.biosphere = QtWidgets.QComboBox()
+        self.background_status = QtWidgets.QLabel()
+        self.background_status.setTextFormat(QtCore.Qt.PlainText)
+        self.background_status.setWordWrap(True)
+        self.use_background = QtWidgets.QPushButton("Use suggested background")
+        self.use_background.clicked.connect(self._use_background)
+        self.technosphere.currentTextChanged.connect(self._refresh_background_status)
+        self.biosphere.currentTextChanged.connect(self._refresh_background_status)
+        self.target_version.textChanged.connect(self._refresh_background_status)
+        self.target_system.currentIndexChanged.connect(self._refresh_background_status)
+        background_row = QtWidgets.QHBoxLayout()
+        background_row.addWidget(self.background_status, 1)
+        background_row.addWidget(self.use_background)
         self.database = QtWidgets.QLineEdit()
         self.database.setPlaceholderText("Use the CLIC package name")
         self.token = TokenEntry()
@@ -128,35 +172,92 @@ class ClicPage(ABAbstractPage):
         form.addRow("ecoinvent system model", self.target_system)
         form.addRow("Project technosphere database", self.technosphere)
         form.addRow("Project biosphere database", self.biosphere)
+        form.addRow(background_row)
         form.addRow("New foreground database", self.database)
         form.addRow("CLIC API token", self.token)
 
         self.import_button = QtWidgets.QPushButton("Prepare import")
         self.import_button.clicked.connect(self._prepare)
+        self.pending_button = QtWidgets.QPushButton("Pending exports")
+        self.pending_menu = QtWidgets.QMenu(self.pending_button)
+        self.pending_button.setMenu(self.pending_menu)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addWidget(self.pending_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.import_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(search_bar)
-        layout.addWidget(self.results, 1)
+        layout.addWidget(self.catalog_preview, 1)
         layout.addLayout(pagination)
         layout.addWidget(self.selection)
         layout.addLayout(form)
-        layout.addWidget(self.import_button, 0, QtCore.Qt.AlignRight)
+        layout.addLayout(buttons)
 
         self.host.signals.project.changed.connect(self._load_databases)
+        self.host.signals.database.written.connect(self._load_databases)
+        self.host.signals.database.deleted.connect(self._load_databases)
         self._load_databases()
-        self._sync_selection()
 
     def _load_databases(self, *_):
+        project = bd.projects.current
+        changed_project = project != self.background_project
+        self.background_project = project
         names = sorted(bd.databases)
         for picker in (self.technosphere, self.biosphere):
-            selected = picker.currentText()
-            picker.clear()
-            picker.addItem("")
-            picker.addItems(names)
-            picker.setCurrentText(selected if selected in names else "")
+            selected = "" if changed_project else picker.currentText()
+            with QtCore.QSignalBlocker(picker):
+                picker.clear()
+                picker.addItem("")
+                picker.addItems(names)
+                picker.setCurrentText(selected if selected in names else "")
+        self.background_suggestions = suggest_backgrounds()
+        if changed_project:
+            self.target_version.clear()
+            self.target_system.setCurrentIndex(0)
+            if len(self.background_suggestions) == 1:
+                self._use_background()
+        self._refresh_background_status()
+        self._refresh_pending()
+        self.imported = imported_versions()
+        self._sync_selection()
 
-        candidates = [name for name in names if "biosphere" in name.casefold()]
-        if not self.biosphere.currentText() and len(candidates) == 1:
-            self.biosphere.setCurrentText(candidates[0])
+    def _background_suggestion(self):
+        name = self.technosphere.currentText()
+        if name:
+            return self.background_suggestions.get(name)
+        if len(self.background_suggestions) == 1:
+            return next(iter(self.background_suggestions.values()))
+        return None
+
+    def _use_background(self):
+        suggestion = self._background_suggestion()
+        if suggestion is not None:
+            self.technosphere.setCurrentText(suggestion.technosphere)
+            self.biosphere.setCurrentText(suggestion.biosphere)
+            self.target_version.setText(suggestion.profile.version)
+            self.target_system.setCurrentIndex(
+                self.target_system.findData(suggestion.profile.model)
+            )
+
+    def _refresh_background_status(self, *_):
+        suggestion = self._background_suggestion()
+        if suggestion is None:
+            self.use_background.setEnabled(False)
+            text = (
+                "Choose a technosphere database to see its suggested background."
+                if self.background_suggestions and not self.technosphere.currentText()
+                else "Choose the local databases and CLIC export target manually."
+            )
+        else:
+            current_pair = (
+                self.technosphere.currentText() == suggestion.technosphere
+                and self.biosphere.currentText() == suggestion.biosphere
+                and self.target_version.text().strip() == suggestion.profile.version
+                and self.target_system.currentData() == suggestion.profile.model
+            )
+            self.use_background.setEnabled(not current_pair)
+            text = f"Suggested target {suggestion.profile.label} with biosphere {suggestion.biosphere}."
+        self.background_status.setText(text)
 
     def showEvent(self, event):
         self._load_databases()
@@ -265,17 +366,61 @@ class ClicPage(ABAbstractPage):
         if column == 0:
             return
         version = self.results.item(row, 0).data(QtCore.Qt.UserRole)
-        if self.details_dialog is None:
-            self.details_dialog = CandidateDetails(self)
-        self.details_dialog.set_version(version)
-        self.details_dialog.show()
-        self.details_dialog.raise_()
+        self._preview(version)
+
+    def _paste_link(self):
+        link, accepted = QtWidgets.QInputDialog.getText(
+            self, "Open a CLIC link", "Dataset or published-version link"
+        )
+        if not accepted or not link.strip():
+            return
+
+        def lookup():
+            with requests.Session() as session:
+                return ClicClient(session).dataset_from_link(link)
+
+        version = self._operation("Open CLIC record", lookup)
+        if version is not None:
+            self._preview(version)
+
+    def _preview(self, version):
+        self.previewed_version = version
+        self.details.set_version(version)
+        self._sync_preview_selection()
+        if self.details.isHidden():
+            self.details.show()
+            width = self.catalog_preview.width()
+            self.catalog_preview.setSizes([width * 3 // 5, width * 2 // 5])
+
+    def _sync_preview_selection(self):
+        version = self.previewed_version
+        if version is not None:
+            selected = version["id"] in self.selected_versions
+            self.details.select_button.setText(
+                "Remove from selection" if selected else "Add to selection"
+            )
+            allowed = version.get("downloads_available", False) and (
+                not self.exclude_noncommercial.isChecked()
+                or not has_noncommercial_license(version)
+            )
+            self.details.select_button.setEnabled(selected or allowed)
+            self.details.set_imported(self.imported.get(version["id"], []))
+
+    def _select_preview(self):
+        version = self.previewed_version
+        if version is not None:
+            self._set_version_selected(
+                version, version["id"] not in self.selected_versions
+            )
 
     def _toggle_version(self, item):
         if item.column() != 0:
             return
         version = item.data(QtCore.Qt.UserRole)
-        if item.checkState() == QtCore.Qt.Checked:
+        self._set_version_selected(version, item.checkState() == QtCore.Qt.Checked)
+
+    def _set_version_selected(self, version, checked):
+        if checked:
             if len(self.selected_versions) >= MAX_EXPORT_VERSIONS:
                 self._sync_selection()
                 self._message(
@@ -307,50 +452,129 @@ class ClicPage(ABAbstractPage):
                 )
         self.selection_list.clear()
         for version in self.selected_versions.values():
+            imported = self.imported.get(version["id"], [])
+            status = " · Already imported" if imported else ""
             item = QtWidgets.QListWidgetItem(
-                f"{version['name']} · {version['location']} · {version['semantic_version']}"
+                f"{version['name']} · {version['location']} · {version['semantic_version']}{status}"
             )
             item.setData(QtCore.Qt.UserRole, version["id"])
+            if imported:
+                item.setToolTip(f"Already imported in {', '.join(imported)}")
             self.selection_list.addItem(item)
         self.selection.setTitle(f"Selected versions ({len(self.selected_versions)})")
         self.clear_button.setEnabled(bool(self.selected_versions))
         self.import_button.setEnabled(bool(self.selected_versions))
+        self._sync_preview_selection()
 
     def _prepare(self):
         versions = list(self.selected_versions.values())
         if not versions:
             return
-        project = bd.projects.current
-        token = self.token.text().strip()
         technosphere = self.technosphere.currentText()
         biosphere = self.biosphere.currentText()
         database = self.database.text().strip()
         target = {
             "family": "ecoinvent",
             "version": self.target_version.text().strip(),
-            "system_model": self.target_system.currentData(),
+            "system_model": self.target_system.currentData() or "",
         }
-        if not all((project, token, technosphere, biosphere, target["version"])):
+        self._run_import(
+            ImportPlan(versions, target, technosphere, biosphere, database)
+        )
+
+    def _pending_path(self):
+        return bd.projects.dir / "ab-clic-exports.json"
+
+    def _refresh_pending(self):
+        self.pending_menu.clear()
+        try:
+            saved = pending_exports(self._pending_path())
+        except (OSError, ValueError, TypeError, KeyError):
+            action = self.pending_menu.addAction("Unable to read saved exports")
+            action.setEnabled(False)
+            self.pending_button.show()
+            return
+        for entry in saved:
+            plan = entry.plan
+            name = (
+                plan.versions[0]["name"]
+                if len(plan.versions) == 1
+                else f"{len(plan.versions)} selected versions"
+            )
+            menu = self.pending_menu.addMenu(
+                f"{name} · {plan.target['version']} {plan.target['system_model']}"
+            )
+            resume = menu.addAction("Resume preparation")
+            resume.triggered.connect(
+                lambda _, export=entry: self._run_import(export.plan, export.status_url)
+            )
+            forget = menu.addAction("Remove from list")
+            forget.triggered.connect(
+                lambda _, export=entry: self._forget_export(export.plan)
+            )
+        self.pending_button.setText(f"Pending exports ({len(saved)})")
+        self.pending_button.setVisible(bool(saved))
+
+    def _forget_export(self, plan):
+        try:
+            remove_pending(self._pending_path(), plan)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self._message(f"Could not update saved CLIC exports.\n\n{exc}")
+        self._refresh_pending()
+
+    def _run_import(self, plan: ImportPlan, status_url: str = ""):
+        project = bd.projects.current
+        token = self.token.text().strip()
+        if not token:
+            self._message("Enter a CLIC token with inventory download access.")
+            return
+        technosphere, biosphere = plan.technosphere, plan.biosphere
+        if not all((project, technosphere, biosphere)):
             self._message(
-                "Choose both Brightway databases, enter an ecoinvent version and provide a CLIC token."
+                "Choose a Brightway project and both local background databases."
             )
             return
-        if technosphere == biosphere:
-            self._message("Choose separate technosphere and biosphere databases.")
+        path = self._pending_path()
+        try:
+            check_project(project, plan.database, technosphere, biosphere)
+            choose_target(
+                technosphere,
+                biosphere,
+                plan.target["version"],
+                plan.target["system_model"],
+            )
+            if not status_url:
+                saved = next(
+                    (
+                        entry
+                        for entry in pending_exports(path)
+                        if plan.same_export(entry.plan)
+                    ),
+                    None,
+                )
+                if saved is not None:
+                    status_url = saved.status_url
+                    if plan != saved.plan:
+                        save_pending(path, PendingExport(plan, status_url))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self._message(str(exc))
             return
         self.token.remember()
 
-        def prepare(on_progress):
+        def prepare(on_progress, stop):
             with requests.Session() as session:
                 client = ClicClient(session)
                 package = client.export(
-                    [version["id"] for version in versions],
-                    target,
+                    plan.version_ids,
+                    plan.target,
                     token,
                     on_progress=on_progress,
+                    status_url=status_url,
+                    on_job=lambda url: save_pending(path, PendingExport(plan, url)),
+                    stop=stop,
                 )
                 client.add_inventory_metadata(
-                    package, versions, on_progress=on_progress
+                    package, plan.versions, on_progress=on_progress
                 )
             with self.host.safe_bw_connection():
                 return prepare_inventory(
@@ -358,7 +582,8 @@ class ClicPage(ABAbstractPage):
                     project=project,
                     technosphere=technosphere,
                     biosphere=biosphere,
-                    database=database,
+                    database=plan.database,
+                    expected_target=plan.target,
                     on_progress=on_progress,
                 )
 
@@ -367,10 +592,18 @@ class ClicPage(ABAbstractPage):
         ):
             try:
                 prepared = run_preparation(self, prepare)
+            except ExportDeferred:
+                return
+            except ExportRejected as exc:
+                self._forget_export(plan)
+                self._message(str(exc))
+                return
             except Exception as exc:
                 self._message(f"Could not prepare the CLIC import.\n\n{exc}")
                 return
-            if not self._confirm(versions, prepared):
+            finally:
+                self._refresh_pending()
+            if not self._confirm(prepared):
                 return
 
             # AB3 also refreshes metadata synchronously on Brightway database
@@ -388,34 +621,15 @@ class ClicPage(ABAbstractPage):
         if error is not None:
             self._message(f"Brightway could not write the inventory.\n\n{error}")
         else:
+            self._forget_export(plan)
+            self.imported = imported_versions()
+            self._sync_selection()
             self._message(
                 f"Imported {len(prepared.importer.data)} activities into {prepared.database}."
             )
 
-    def _confirm(self, versions, prepared):
-        dialog = QtWidgets.QMessageBox(self)
-        dialog.setWindowTitle("Import from CLIC")
-        dialog.setTextFormat(QtCore.Qt.PlainText)
-        if len(versions) == 1:
-            version = versions[0]
-            subject = f"{version['name']} ({version['semantic_version']})"
-        else:
-            subject = f"{len(versions)} CLIC versions"
-        dialog.setText(f"Import {subject} into {prepared.project}?")
-        details = f"{len(prepared.importer.data)} activities will be written to {prepared.database}."
-        if prepared.warnings:
-            details += f" CLIC reported {len(prepared.warnings)} conversion warnings."
-            dialog.setDetailedText(
-                "\n".join(
-                    warning.get("message") or warning.get("detail") or str(warning)
-                    for warning in prepared.warnings
-                )
-            )
-        dialog.setInformativeText(details)
-        import_button = dialog.addButton("Import", QtWidgets.QMessageBox.AcceptRole)
-        dialog.addButton(QtWidgets.QMessageBox.Cancel)
-        dialog.exec()
-        return dialog.clickedButton() == import_button
+    def _confirm(self, prepared):
+        return ImportReview(prepared, self).exec() == QtWidgets.QDialog.Accepted
 
     def _message(self, text):
         dialog = QtWidgets.QMessageBox(self)

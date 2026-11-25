@@ -5,11 +5,10 @@ from qtpy import QtCore, QtWidgets
 from .metadata import catalog_metadata
 
 
-class CandidateDetails(QtWidgets.QDialog):
+class CandidateDetails(QtWidgets.QWidget):
     def __init__(self, parent):
         super().__init__(parent)
-        self.setWindowTitle("CLIC inventory details")
-        self.resize(580, 460)
+        self.setMinimumWidth(230)
 
         self.heading = QtWidgets.QLabel()
         self.heading.setTextFormat(QtCore.Qt.PlainText)
@@ -46,28 +45,58 @@ class CandidateDetails(QtWidgets.QDialog):
             self.form.addRow(title, value)
             self.fields[title] = value
 
-        self.description = QtWidgets.QPlainTextEdit()
-        self.description.setReadOnly(True)
-        self.description.setPlaceholderText(
-            "CLIC has no published description for this version."
-        )
+        self.description = QtWidgets.QLabel()
+        self.description.setTextFormat(QtCore.Qt.PlainText)
+        self.description.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.description.setWordWrap(True)
         description_label = QtWidgets.QLabel("Description")
-        description_label.setBuddy(self.description)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-        buttons.rejected.connect(self.close)
+        font = description_label.font()
+        font.setBold(True)
+        description_label.setFont(font)
+
+        content = QtWidgets.QWidget()
+        body = QtWidgets.QVBoxLayout(content)
+        body.addWidget(self.heading)
+        body.addWidget(description_label)
+        body.addWidget(self.description)
+        body.addLayout(self.form)
+        body.addStretch(1)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        self.select_button = QtWidgets.QPushButton("Add to selection")
+        self.imported = QtWidgets.QLabel()
+        self.imported.setTextFormat(QtCore.Qt.PlainText)
+        self.imported.setWordWrap(True)
+        self.imported.hide()
+        hide = QtWidgets.QPushButton("Hide preview")
+        hide.clicked.connect(self.hide)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addWidget(self.select_button)
+        buttons.addStretch(1)
+        buttons.addWidget(hide)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(self.heading)
-        layout.addLayout(self.form)
-        layout.addWidget(description_label)
-        layout.addWidget(self.description, 1)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.imported)
+        layout.addWidget(scroll, 1)
+        layout.addLayout(buttons)
 
     def set_version(self, version):
         values = catalog_metadata(version)
         self.heading.setText(version["name"])
-        self.description.setPlainText(version.get("description") or "")
+        self.description.setText(
+            version.get("description")
+            or "CLIC has no published description for this version."
+        )
         for key, label in self.fields.items():
             text = values.get(key) or ""
             label.setText(text)
             self.form.setRowVisible(label, bool(text))
+
+    def set_imported(self, databases):
+        self.imported.setText(
+            f"Already imported in {', '.join(databases)}" if databases else ""
+        )
+        self.imported.setVisible(bool(databases))

@@ -1,9 +1,11 @@
 """Read published CLIC metadata and export selected versions together."""
 
 import logging
+import re
 import time
-from collections.abc import Iterable, Mapping
-from urllib.parse import quote, urljoin, urlsplit
+from collections.abc import Callable, Iterable, Mapping
+from threading import Event
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import requests
 
@@ -14,11 +16,23 @@ CLIC_URL = "https://clic.psi.ch"
 PAGE_SIZE = 25
 MAX_EXPORT_VERSIONS = 100
 YEAR_FIELDS = {"publication_year", "inventory_reference_year"}
+DATASET_LINK = re.compile(
+    r"/(?:api/)?datasets/([a-zA-Z0-9_-]+)(?:/versions/(\d+(?:\.\d+\.\d+)?))?/?"
+)
+VERSION_API_LINK = re.compile(r"/api/versions/([1-9]\d*)/?")
 logger = logging.getLogger(__name__)
 
 
 class ClicError(RuntimeError):
     """A CLIC operation could not be completed."""
+
+
+class ExportDeferred(Exception):
+    """The user stopped waiting for a saved CLIC export job."""
+
+
+class ExportRejected(ClicError):
+    """The server reported that this export job failed."""
 
 
 def has_noncommercial_license(version: dict) -> bool:
@@ -37,6 +51,32 @@ def _matches_columns(version: dict, filters: Mapping[str, tuple[str, bool]]) -> 
 class ClicClient:
     def __init__(self, session: requests.Session):
         self.session = session
+
+    def dataset_from_link(self, link: str) -> dict:
+        try:
+            url = urlsplit(link.strip())
+        except ValueError:
+            raise ClicError("Paste a CLIC dataset or published-version link.") from None
+        if (url.scheme, url.netloc) != ("https", "clic.psi.ch"):
+            raise ClicError("Paste a link from https://clic.psi.ch.")
+        path = unquote(url.path)
+        if version_api := VERSION_API_LINK.fullmatch(path):
+            return self._request("GET", f"/api/versions/{version_api[1]}/")
+        if not (dataset_link := DATASET_LINK.fullmatch(path)):
+            raise ClicError("Paste a CLIC dataset or published-version link.")
+        slug, revision = dataset_link.groups()
+        if revision and revision.isascii() and revision.isdecimal():
+            version = self._request("GET", f"/api/versions/{revision}/")
+            if version.get("dataset_slug") != slug:
+                raise ClicError("The CLIC version is not part of this dataset.")
+            return version
+        dataset = self._request("GET", f"/api/datasets/{slug}/")
+        if not revision:
+            return dataset["latest_published_version"]
+        for version in dataset.get("published_versions", []):
+            if version["semantic_version"] == revision:
+                return version
+        raise ClicError(f"Published version {revision} is unavailable in CLIC.")
 
     def search_datasets(
         self,
@@ -87,18 +127,30 @@ class ClicClient:
         token: str,
         *,
         on_progress: ProgressCallback = ignore_progress,
+        status_url: str = "",
+        on_job: Callable[[str], None] | None = None,
+        stop: Event | None = None,
     ) -> dict:
         ids = sorted(set(version_ids))
         if not 1 <= len(ids) <= MAX_EXPORT_VERSIONS:
             raise ClicError(
                 f"Select 1 to {MAX_EXPORT_VERSIONS} CLIC versions to export."
             )
-        path = f"/api/versions/{ids[0]}/brightway-json-jobs/"
-        payload = {**target, "version_ids": ids[1:]} if len(ids) > 1 else target
-        on_progress(
-            PreparationStep.REQUEST_EXPORT, "Requesting a Brightway export from CLIC…"
-        )
-        job = self._request("POST", path, token=token, json=payload)
+        if status_url:
+            on_progress(
+                PreparationStep.WAIT_FOR_EXPORT, "Checking your saved CLIC export…"
+            )
+            job = self._request("GET", status_url, token=token)
+        else:
+            path = f"/api/versions/{ids[0]}/brightway-json-jobs/"
+            payload = {**target, "version_ids": ids[1:]} if len(ids) > 1 else target
+            on_progress(
+                PreparationStep.REQUEST_EXPORT,
+                "Requesting a Brightway export from CLIC…",
+            )
+            job = self._request("POST", path, token=token, json=payload)
+            if on_job is not None:
+                on_job(job["status_url"])
         deadline = time.monotonic() + 180
         wait_messages = {
             "queued": "CLIC has queued the export. Waiting for it to start…",
@@ -112,15 +164,21 @@ class ClicClient:
                 previous_status = status
             if time.monotonic() >= deadline:
                 raise ClicError(
-                    "CLIC is still preparing the export. Try again later to reuse the job."
+                    "CLIC is still preparing the export. Resume it from Pending exports."
                 )
-            time.sleep(2)
-            job = self._request("GET", job["status_url"], token=token)
+            if stop is None:
+                time.sleep(2)
+            elif stop.wait(2):
+                raise ExportDeferred
+            status_url = job.get("status_url") or status_url
+            job = self._request("GET", status_url, token=token)
 
+        if stop is not None and stop.is_set():
+            raise ExportDeferred
         if job["status"] != "succeeded":
             error = job.get("error") or {}
             detail = error.get("detail") or error.get("message") or job["status"]
-            raise ClicError(f"CLIC could not prepare this export. {detail}")
+            raise ExportRejected(f"CLIC could not prepare this export. {detail}")
 
         on_progress(
             PreparationStep.DOWNLOAD_PACKAGE,
@@ -181,9 +239,18 @@ class ClicClient:
 
         for identity, activity in activities:
             if identity in records:
-                comment = inventory_comment(
-                    records[identity], activity.get("comment") or ""
-                )
+                record = records[identity]
+                activity["provenance"]["clic_catalog"] = {
+                    key: record[key]
+                    for key in (
+                        "id",
+                        "public_url",
+                        "selected_license",
+                        "selected_license_label",
+                    )
+                    if record.get(key) is not None
+                }
+                comment = inventory_comment(record, activity.get("comment") or "")
                 if comment:
                     activity["comment"] = comment
 
