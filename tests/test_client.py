@@ -1,10 +1,11 @@
 import unittest
-from threading import Event
+from threading import Barrier, Event
 from unittest.mock import Mock, patch
 
 import requests
 
 from ab_clic.client import ClicClient, ClicError, ExportDeferred
+from ab_clic.catalog_cache import CatalogCache, MAX_AGE_SECONDS
 from ab_clic.progress import PreparationStep
 
 
@@ -359,3 +360,73 @@ class ClicClientTests(unittest.TestCase):
             ("GET", "https://clic.psi.ch/api/datasets/supplier/"),
         )
         self.assertEqual(self.session.request.call_args.kwargs["headers"], {})
+
+    def test_import_reuses_recent_exact_version_metadata_from_search(self):
+        cache = CatalogCache()
+        browse = ClicClient(self.session, cache)
+        record = {
+            "dataset_slug": "solar",
+            "semantic_version": "1.0.0",
+            "id": 42,
+            "description": "Solar supply",
+        }
+        self.session.request.return_value = self.response(self.dataset_page([record]))
+        browse.search_datasets("solar", 1)
+        importer = ClicClient(Mock(spec=requests.Session), cache)
+        activity = {
+            "provenance": {"dataset_slug": "solar", "semantic_version": "1.0.0"}
+        }
+        importer.add_inventory_metadata({"activities": [activity]}, [])
+        importer.session.request.assert_not_called()
+        self.assertEqual(activity["provenance"]["clic_catalog"]["id"], 42)
+        self.assertTrue(activity["comment"].startswith("Solar supply"))
+
+    def test_expired_catalog_entries_are_refetched(self):
+        record = {"dataset_slug": "solar", "semantic_version": "1.0.0", "id": 42}
+        activity = {
+            "provenance": {"dataset_slug": "solar", "semantic_version": "1.0.0"}
+        }
+        self.session.request.return_value = self.response(
+            {"published_versions": [{**record, "description": "Corrected"}]}
+        )
+        with patch(
+            "ab_clic.catalog_cache.monotonic",
+            side_effect=[0, MAX_AGE_SECONDS, MAX_AGE_SECONDS],
+        ):
+            self.client.catalog_cache.remember(record)
+            self.client.add_inventory_metadata({"activities": [activity]}, [])
+        self.session.request.assert_called_once()
+        self.assertTrue(activity["comment"].startswith("Corrected"))
+
+    def test_uncached_supplier_requests_overlap_and_failed_lookup_is_not_cached(self):
+        barrier = Barrier(2)
+        activity = {
+            "provenance": {"dataset_slug": "solar", "semantic_version": "1.0.0"}
+        }
+        other = {"provenance": {"dataset_slug": "wind", "semantic_version": "1.0.0"}}
+        progress = Mock()
+
+        def lookup(client, method, path):
+            self.assertEqual(method, "GET")
+            barrier.wait(timeout=5)
+            if path == "/api/datasets/wind/":
+                raise ClicError("Temporary catalog failure")
+            return {
+                "published_versions": [
+                    {"semantic_version": "1.0.0", "selected_license": "CC-BY-4.0"}
+                ]
+            }
+
+        with (
+            patch.object(ClicClient, "_request", lookup),
+            self.assertLogs("ab_clic.client", level="WARNING"),
+        ):
+            self.client.add_inventory_metadata(
+                {"activities": [activity, other]}, [], on_progress=progress
+            )
+        self.assertEqual(
+            activity["provenance"]["clic_catalog"]["selected_license"], "CC-BY-4.0"
+        )
+        self.assertNotIn("clic_catalog", other["provenance"])
+        self.assertIsNone(self.client.catalog_cache.get(("wind", "1.0.0")))
+        self.assertIn("2 of 2 datasets checked", progress.call_args.args[1])

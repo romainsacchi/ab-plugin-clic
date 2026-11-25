@@ -4,17 +4,21 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
-from threading import Event
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from threading import Event, Lock, local
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import requests
 
+from .catalog_cache import CatalogCache
 from .metadata import inventory_comment
 from .progress import PreparationStep, ProgressCallback, ignore_progress
 
 CLIC_URL = "https://clic.psi.ch"
 PAGE_SIZE = 25
 MAX_EXPORT_VERSIONS = 100
+METADATA_WORKERS = 6
 YEAR_FIELDS = {"publication_year", "inventory_reference_year"}
 DATASET_LINK = re.compile(
     r"/(?:api/)?datasets/([a-zA-Z0-9_-]+)(?:/versions/(\d+(?:\.\d+\.\d+)?))?/?"
@@ -49,8 +53,13 @@ def _matches_columns(version: dict, filters: Mapping[str, tuple[str, bool]]) -> 
 
 
 class ClicClient:
-    def __init__(self, session: requests.Session):
+    def __init__(
+        self, session: requests.Session, catalog_cache: CatalogCache | None = None
+    ):
         self.session = session
+        self.catalog_cache = (
+            catalog_cache if catalog_cache is not None else CatalogCache()
+        )
 
     def dataset_from_link(self, link: str) -> dict:
         try:
@@ -61,7 +70,9 @@ class ClicClient:
             raise ClicError("Paste a link from https://clic.psi.ch.")
         path = unquote(url.path)
         if version_api := VERSION_API_LINK.fullmatch(path):
-            return self._request("GET", f"/api/versions/{version_api[1]}/")
+            record = self._request("GET", f"/api/versions/{version_api[1]}/")
+            self.catalog_cache.remember(record)
+            return record
         if not (dataset_link := DATASET_LINK.fullmatch(path)):
             raise ClicError("Paste a CLIC dataset or published-version link.")
         slug, revision = dataset_link.groups()
@@ -69,12 +80,16 @@ class ClicClient:
             version = self._request("GET", f"/api/versions/{revision}/")
             if version.get("dataset_slug") != slug:
                 raise ClicError("The CLIC version is not part of this dataset.")
+            self.catalog_cache.remember(version)
             return version
         dataset = self._request("GET", f"/api/datasets/{slug}/")
         if not revision:
-            return dataset["latest_published_version"]
+            latest = dataset["latest_published_version"]
+            self.catalog_cache.remember(latest, slug)
+            return latest
         for version in dataset.get("published_versions", []):
             if version["semantic_version"] == revision:
+                self.catalog_cache.remember(version, slug)
                 return version
         raise ClicError(f"Published version {revision} is unavailable in CLIC.")
 
@@ -108,6 +123,8 @@ class ClicClient:
             latest_versions = [
                 dataset["latest_published_version"] for dataset in result["results"]
             ]
+            for version in latest_versions:
+                self.catalog_cache.remember(version)
             if not exclude_noncommercial and not filters:
                 return {**result, "results": latest_versions}
             matches = [
@@ -217,24 +234,26 @@ class ClicClient:
             identity = (slug, version)
             activities.append((identity, activity))
             if identity not in records:
-                by_slug.setdefault(slug, set()).add(version)
+                cached = self.catalog_cache.get(identity)
+                if cached is None:
+                    by_slug.setdefault(slug, set()).add(version)
+                else:
+                    records[identity] = cached
 
-        for number, (slug, versions) in enumerate(by_slug.items(), start=1):
+        if by_slug:
             on_progress(
                 PreparationStep.READ_METADATA,
-                f"Reading published CLIC metadata ({number} of {len(by_slug)} catalog records)…",
+                f"Reading published CLIC metadata (0 of {len(by_slug)} datasets checked)…",
             )
-            try:
-                dataset = self._request("GET", f"/api/datasets/{quote(slug, safe='')}/")
-            except ClicError as exc:
-                logger.warning("Could not read CLIC metadata for %s: %s", slug, exc)
-                continue
-            records.update(
-                {
-                    (slug, version["semantic_version"]): version
-                    for version in dataset.get("published_versions", [])
-                    if version["semantic_version"] in versions
-                }
+        for checked, (slug, versions) in enumerate(
+            self._read_catalog_metadata(by_slug), start=1
+        ):
+            for record in versions:
+                self.catalog_cache.remember(record, slug)
+                records[slug, record["semantic_version"]] = record
+            on_progress(
+                PreparationStep.READ_METADATA,
+                f"Reading published CLIC metadata ({checked} of {len(by_slug)} datasets checked)…",
             )
 
         for identity, activity in activities:
@@ -253,6 +272,44 @@ class ClicClient:
                 comment = inventory_comment(record, activity.get("comment") or "")
                 if comment:
                     activity["comment"] = comment
+
+    def _read_catalog_metadata(self, by_slug: dict[str, set[str]]):
+        if len(by_slug) <= 1:
+            for slug, revisions in by_slug.items():
+                yield slug, self._read_dataset_versions(slug, revisions)
+            return
+
+        worker_state = local()
+        lock = Lock()
+        with ExitStack() as sessions:
+
+            def read(slug, revisions):
+                # Requests sessions own mutable state. Each worker reuses its own connection.
+                if not hasattr(worker_state, "client"):
+                    with lock:
+                        session = sessions.enter_context(requests.Session())
+                    worker_state.client = ClicClient(session)
+                return slug, worker_state.client._read_dataset_versions(slug, revisions)
+
+            with ThreadPoolExecutor(max_workers=METADATA_WORKERS) as workers:
+                futures = [
+                    workers.submit(read, slug, revisions)
+                    for slug, revisions in by_slug.items()
+                ]
+                for future in as_completed(futures):
+                    yield future.result()
+
+    def _read_dataset_versions(self, slug: str, revisions: set[str]) -> list[dict]:
+        try:
+            dataset = self._request("GET", f"/api/datasets/{quote(slug, safe='')}/")
+        except ClicError as exc:
+            logger.warning("Could not read CLIC metadata for %s: %s", slug, exc)
+            return []
+        return [
+            record
+            for record in dataset.get("published_versions", [])
+            if record.get("semantic_version") in revisions
+        ]
 
     def _request(self, method: str, path: str, *, token: str = "", **kwargs) -> dict:
         url = urljoin(CLIC_URL, path)

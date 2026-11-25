@@ -6,6 +6,7 @@ from activity_browser.plugins import ABAbstractPage
 from qtpy import QtCore, QtWidgets
 
 from .background import choose_target, suggest_backgrounds
+from .catalog_cache import CatalogCache
 from .catalog_table import COLUMNS, CatalogCell, CatalogTable
 from .client import (
     MAX_EXPORT_VERSIONS,
@@ -49,6 +50,7 @@ class ClicPage(ABAbstractPage):
     def __init__(self, *args, host, **kwargs):
         super().__init__(*args, **kwargs)
         self.host = host
+        self.catalog_cache = CatalogCache()
         self.selected_versions = {}
         self.previewed_version = None
         self.active_search = None
@@ -306,7 +308,7 @@ class ClicPage(ABAbstractPage):
 
         def lookup():
             with requests.Session() as session:
-                return ClicClient(session).search_datasets(
+                return ClicClient(session, self.catalog_cache).search_datasets(
                     query,
                     number,
                     field=field,
@@ -377,7 +379,7 @@ class ClicPage(ABAbstractPage):
 
         def lookup():
             with requests.Session() as session:
-                return ClicClient(session).dataset_from_link(link)
+                return ClicClient(session, self.catalog_cache).dataset_from_link(link)
 
         version = self._operation("Open CLIC record", lookup)
         if version is not None:
@@ -563,7 +565,7 @@ class ClicPage(ABAbstractPage):
 
         def prepare(on_progress, stop):
             with requests.Session() as session:
-                client = ClicClient(session)
+                client = ClicClient(session, self.catalog_cache)
                 package = client.export(
                     plan.version_ids,
                     plan.target,
