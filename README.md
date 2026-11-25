@@ -2,22 +2,20 @@
 
 Browse published life cycle inventories from the [Curated Life cycle Inventory Collection (CLIC)](https://clic.psi.ch/) and import them into your active Brightway project.
 
-## Install the alpha
+## Install from PyPI
 
-Use a dedicated Python environment. Python 3.12 on macOS is the tested setup. The plugin requires Activity Browser's [plugin-enabled development build](https://github.com/LCA-ActivityBrowser/activity-browser/tree/aa164283a3a171ccdeed7fba1fc431a89b9d5c12). The standard Activity Browser 3.0.0 release and its standalone installers lack the plugin loader.
-
-From the root of this repository, run:
+Install [`ab-plugin-clic` 0.1.0a1](https://pypi.org/project/ab-plugin-clic/0.1.0a1/) and the pinned [plugin-enabled Activity Browser build](https://github.com/LCA-ActivityBrowser/activity-browser/tree/aa164283a3a171ccdeed7fba1fc431a89b9d5c12) in the same Python environment. Python 3.12 on macOS is the tested setup. Activity Browser 3.0.0 and its standalone installers lack the plugin loader.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install \
   'activity-browser @ git+https://github.com/LCA-ActivityBrowser/activity-browser.git@aa164283a3a171ccdeed7fba1fc431a89b9d5c12' \
-  .
+  'ab-plugin-clic==0.1.0a1'
 activity-browser
 ```
 
-To install from a built wheel, replace the final `.` with the wheel path. For development, replace it with `-e .`.
+If you already have the pinned Activity Browser build, activate its environment and run `python -m pip install 'ab-plugin-clic==0.1.0a1'`.
 
 In Activity Browser, open **Settings → Plugins**, enable **CLIC**, save, and restart. Then open **Plugins → CLIC → Browse and import**.
 
@@ -41,7 +39,7 @@ An unresolved link prevents the import. Check the exchange and database shown in
 
 ## Development
 
-Use the same environment as Activity Browser. To run the tests and lint checks, install the plugin in editable mode and install `ruff`.
+Use the same environment as the pinned Activity Browser build. From the repository root, install the plugin with `python -m pip install -e .` and install `ruff` for the lint checks.
 
 ```bash
 python -m unittest discover -s tests -v
