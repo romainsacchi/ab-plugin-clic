@@ -32,7 +32,6 @@ class CatalogCell(QtWidgets.QTableWidgetItem):
 
 
 class CatalogTable(QtWidgets.QTableWidget):
-    name_sort_requested = QtCore.Signal(str)
     column_filters_requested = QtCore.Signal(object)
 
     def __init__(self, parent=None):
@@ -58,20 +57,17 @@ class CatalogTable(QtWidgets.QTableWidget):
         descending = (
             self.sort_column == column and self.sort_order == QtCore.Qt.AscendingOrder
         )
-        if COLUMNS[column][0] == "name":
-            self.name_sort_requested.emit("name_desc" if descending else "name_asc")
-        else:
-            order = (
-                QtCore.Qt.DescendingOrder if descending else QtCore.Qt.AscendingOrder
-            )
-            self.set_result_sort(column, order)
-
-    def set_result_sort(self, column, order):
         self.sort_column = column
-        self.sort_order = order
+        self.sort_order = (
+            QtCore.Qt.DescendingOrder if descending else QtCore.Qt.AscendingOrder
+        )
+        current = self.currentItem()
         self.apply_sort()
+        if current is not None:
+            self.setCurrentItem(current)
+            self.scrollToItem(current)
         header = self.horizontalHeader()
-        header.setSortIndicator(column, order)
+        header.setSortIndicator(column, self.sort_order)
         header.setSortIndicatorShown(True)
 
     def apply_sort(self):
@@ -82,8 +78,7 @@ class CatalogTable(QtWidgets.QTableWidget):
         self.column_filters = filters
         for column, (field, title, _) in enumerate(COLUMNS[1:], start=1):
             item = self.horizontalHeaderItem(column)
-            scope = "search results" if field == "name" else "this page"
-            hint = f"Click to sort {scope}. Right-click to filter."
+            hint = "Click to sort this page. Right-click to filter."
             if field in filters:
                 term, exclude = filters[field]
                 item.setText(f"{title} •")

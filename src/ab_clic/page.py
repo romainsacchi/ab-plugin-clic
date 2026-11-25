@@ -1,11 +1,9 @@
 """Activity Browser page for selecting and importing CLIC inventories."""
 
-from importlib.resources import files
-
 import bw2data as bd
 import requests
 from activity_browser.plugins import ABAbstractPage
-from qtpy import QtCore, QtSvgWidgets, QtWidgets
+from qtpy import QtCore, QtWidgets
 
 from .catalog_table import COLUMNS, CatalogCell, CatalogTable
 from .client import MAX_EXPORT_VERSIONS, ClicClient, has_noncommercial_license
@@ -38,7 +36,6 @@ class ClicPage(ABAbstractPage):
         self.selected_versions = {}
         self.details_dialog = None
         self.active_search = None
-        self.catalog_sort = ""
         self.page_number = 1
 
         self.search_field = QtWidgets.QComboBox()
@@ -74,7 +71,6 @@ class ClicPage(ABAbstractPage):
         self.results.itemChanged.connect(self._toggle_version)
         self.results.cellClicked.connect(self._show_details)
         self.results.cellActivated.connect(self._show_details)
-        self.results.name_sort_requested.connect(self._sort_inventory)
         self.results.column_filters_requested.connect(self._filter_columns)
 
         self.previous = QtWidgets.QPushButton("Previous")
@@ -137,22 +133,13 @@ class ClicPage(ABAbstractPage):
 
         self.import_button = QtWidgets.QPushButton("Prepare import")
         self.import_button.clicked.connect(self._prepare)
-        logo = QtSvgWidgets.QSvgWidget()
-        mark = files("ab_clic").joinpath("assets", "clic-mark.svg")
-        logo.load(QtCore.QByteArray(mark.read_bytes()))
-        logo.setFixedSize(28, 28)
-        logo.setAccessibleName("CLIC logo")
-        footer = QtWidgets.QHBoxLayout()
-        footer.addWidget(logo)
-        footer.addStretch(1)
-        footer.addWidget(self.import_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(search_bar)
         layout.addWidget(self.results, 1)
         layout.addLayout(pagination)
         layout.addWidget(self.selection)
         layout.addLayout(form)
-        layout.addLayout(footer)
+        layout.addWidget(self.import_button, 0, QtCore.Qt.AlignRight)
 
         self.host.signals.project.changed.connect(self._load_databases)
         self._load_databases()
@@ -184,19 +171,6 @@ class ClicPage(ABAbstractPage):
                 *self.active_search, self.page_number + direction, direction=direction
             )
 
-    def _sort_inventory(self, sort):
-        if self.active_search is not None and not self._load_page(
-            *self.active_search, 1, sort=sort
-        ):
-            return
-        self.catalog_sort = sort
-        order = (
-            QtCore.Qt.AscendingOrder
-            if sort == "name_asc"
-            else QtCore.Qt.DescendingOrder
-        )
-        self.results.set_result_sort(1, order)
-
     def _filter_columns(self, filters):
         if self.active_search is None or self._load_page(
             *self.active_search, 1, column_filters=filters
@@ -223,9 +197,7 @@ class ClicPage(ABAbstractPage):
             # The host has already displayed the worker error.
             return None
 
-    def _load_page(
-        self, field, query, number, *, direction=None, sort=None, column_filters=None
-    ):
+    def _load_page(self, field, query, number, *, direction=None, column_filters=None):
         exclude_noncommercial = self.exclude_noncommercial.isChecked()
         filters = (
             self.results.column_filters if column_filters is None else column_filters
@@ -233,11 +205,10 @@ class ClicPage(ABAbstractPage):
 
         def lookup():
             with requests.Session() as session:
-                return ClicClient(session).search_versions(
+                return ClicClient(session).search_datasets(
                     query,
                     number,
                     field=field,
-                    sort=self.catalog_sort if sort is None else sort,
                     exclude_noncommercial=exclude_noncommercial,
                     column_filters=filters,
                     direction=direction or 1,
@@ -250,7 +221,7 @@ class ClicPage(ABAbstractPage):
         if filters_active and not page["results"] and direction is not None:
             (self.previous if direction < 0 else self.next).setEnabled(False)
             self.status.setText(
-                "No more versions match the current filters in this direction."
+                "No more datasets match the current filters in this direction."
             )
             return True
         self.active_search = (field, query)
@@ -272,22 +243,21 @@ class ClicPage(ABAbstractPage):
                 self.results.setItem(row, 0, check)
                 for column, (key, _, _) in enumerate(COLUMNS[1:], start=1):
                     self.results.setItem(row, column, CatalogCell(key, version[key]))
-            if sort is None:
-                self.results.apply_sort()
+            self.results.apply_sort()
         if not page["results"]:
             self.previous.setEnabled(False)
             self.next.setEnabled(False)
-            self.status.setText("No published versions match your search.")
+            self.status.setText("No published datasets match your search.")
         else:
             self.previous.setEnabled(bool(page["previous"]))
             self.next.setEnabled(bool(page["next"]))
             if filters_active:
                 self.status.setText(
-                    f"Catalog page {self.page_number} · {len(page['results'])} versions shown"
+                    f"Catalog page {self.page_number} · {len(page['results'])} datasets shown"
                 )
             else:
                 self.status.setText(
-                    f"Page {self.page_number} · {page['count']} published versions"
+                    f"Page {self.page_number} · {page['count']} published datasets"
                 )
         return True
 

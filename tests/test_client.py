@@ -18,35 +18,52 @@ class ClicClientTests(unittest.TestCase):
         response.json.return_value = payload
         return response
 
+    @staticmethod
+    def dataset_page(versions, **pagination):
+        return {
+            **pagination,
+            "results": [{"latest_published_version": version} for version in versions],
+        }
+
     def test_search_is_anonymous(self):
         self.session.request.return_value = self.response({"results": []})
-        self.client.search_versions("electricity", 2)
+        self.client.search_datasets("electricity", 2)
         request = self.session.request.call_args
-        self.assertEqual(request.args, ("GET", "https://clic.psi.ch/api/versions/"))
+        self.assertEqual(request.args, ("GET", "https://clic.psi.ch/api/datasets/"))
         self.assertEqual(request.kwargs["params"]["page"], 2)
         self.assertEqual(request.kwargs["headers"], {})
 
     def test_search_uses_the_selected_field(self):
         self.session.request.return_value = self.response({"results": []})
-        self.client.search_versions("Krogh", 1, field="author")
+        self.client.search_datasets("Krogh", 1, field="author")
         self.assertEqual(
             self.session.request.call_args.kwargs["params"]["author"], "Krogh"
         )
         self.assertNotIn("name", self.session.request.call_args.kwargs["params"])
 
-    def test_project_search_sends_the_requested_catalog_sort(self):
+    def test_project_search_uses_project_filter_and_page(self):
         self.session.request.return_value = self.response({"results": []})
-        self.client.search_versions(
-            "Inventory project", 2, field="project", sort="name_desc"
-        )
+        self.client.search_datasets("Inventory project", 2, field="project")
         request = self.session.request.call_args.kwargs["params"]
         self.assertEqual(request["project"], "Inventory project")
-        self.assertEqual(request["sort"], "name_desc")
         self.assertEqual(request["page"], 2)
+
+    def test_search_reads_only_the_latest_published_version_for_each_dataset(self):
+        latest = {"id": 55, "semantic_version": "2.0.0"}
+        other = {"id": 61, "semantic_version": "1.0.0"}
+        data = self.dataset_page([latest, other], count=2, page=1)
+        data["results"][0]["published_versions"] = [
+            {"id": 12, "semantic_version": "1.0.0"},
+            latest,
+        ]
+        self.session.request.return_value = self.response(data)
+        result = self.client.search_datasets("", 1)
+        self.assertEqual(result["results"], [latest, other])
+        self.assertEqual(result["count"], 2)
 
     def test_publication_year_search_uses_an_exact_year_range(self):
         self.session.request.return_value = self.response({"results": []})
-        self.client.search_versions("2024", 1, field="publication_year")
+        self.client.search_datasets("2024", 1, field="publication_year")
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(params["publication_year_min"], "2024")
         self.assertEqual(params["publication_year_max"], "2024")
@@ -62,13 +79,13 @@ class ClicClientTests(unittest.TestCase):
         ]
         self.session.request.side_effect = [
             self.response(
-                {"page": 2, "previous": "previous-url", "results": noncommercial}
+                self.dataset_page(noncommercial, page=2, previous="previous-url")
             ),
             self.response(
-                {"page": 1, "previous": None, "results": [*visible, *noncommercial]}
+                self.dataset_page([*visible, *noncommercial], page=1, previous=None)
             ),
         ]
-        result = self.client.search_versions(
+        result = self.client.search_datasets(
             "solar", 2, exclude_noncommercial=True, direction=-1
         )
         self.assertEqual(result["results"], visible)
@@ -88,15 +105,13 @@ class ClicClientTests(unittest.TestCase):
         wrong_name = {**visible, "id": 30, "name": "Wind electricity"}
         self.session.request.side_effect = [
             self.response(
-                {
-                    "page": 1,
-                    "next": "next-url",
-                    "results": [wrong_location, excluded_id],
-                }
+                self.dataset_page(
+                    [wrong_location, excluded_id], page=1, next="next-url"
+                )
             ),
-            self.response({"page": 2, "next": None, "results": [visible, wrong_name]}),
+            self.response(self.dataset_page([visible, wrong_name], page=2, next=None)),
         ]
-        result = self.client.search_versions(
+        result = self.client.search_datasets(
             "electricity",
             1,
             column_filters={

@@ -38,13 +38,12 @@ class ClicClient:
     def __init__(self, session: requests.Session):
         self.session = session
 
-    def search_versions(
+    def search_datasets(
         self,
         query: str,
         page: int,
         *,
         field: str = "name",
-        sort: str = "",
         exclude_noncommercial: bool = False,
         column_filters: Mapping[str, tuple[str, bool]] | None = None,
         direction: int = 1,
@@ -57,8 +56,6 @@ class ClicClient:
             params[f"{field}_min"] = params[f"{field}_max"] = query
         elif query:
             params[field] = query
-        if sort:
-            params["sort"] = sort
         filters = {
             field: (term.casefold(), exclude)
             for field, (term, exclude) in (column_filters or {}).items()
@@ -66,18 +63,21 @@ class ClicClient:
 
         while True:
             result = self._request(
-                "GET", "/api/versions/", params={**params, "page": page}
+                "GET", "/api/datasets/", params={**params, "page": page}
             )
+            latest_versions = [
+                dataset["latest_published_version"] for dataset in result["results"]
+            ]
             if not exclude_noncommercial and not filters:
-                return result
-            result["results"] = [
+                return {**result, "results": latest_versions}
+            matches = [
                 version
-                for version in result["results"]
+                for version in latest_versions
                 if (not exclude_noncommercial or not has_noncommercial_license(version))
                 and _matches_columns(version, filters)
             ]
-            if result["results"] or not result["next" if direction > 0 else "previous"]:
-                return result
+            if matches or not result["next" if direction > 0 else "previous"]:
+                return {**result, "results": matches}
             page = result["page"] + direction
 
     def export(
