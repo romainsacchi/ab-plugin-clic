@@ -4,8 +4,8 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from ab_clic.catalog_cache import MAX_AGE_SECONDS, CatalogCache
 from ab_clic.client import ClicClient, ClicError, ExportDeferred
-from ab_clic.catalog_cache import CatalogCache, MAX_AGE_SECONDS
 from ab_clic.progress import PreparationStep
 
 

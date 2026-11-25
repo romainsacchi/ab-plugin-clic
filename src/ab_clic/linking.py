@@ -1,10 +1,12 @@
 """Match each external exchange uniquely and retain the reasons for failures."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 import bw2data as bd
-from bw2io.utils import activity_hash
+
+TECHNOSPHERE_FIELDS = ("name", "reference product", "location", "unit")
+BIOSPHERE_FIELDS = ("name", "categories", "unit")
 
 
 @dataclass(frozen=True)
@@ -28,31 +30,59 @@ def describe_exchange(exchange: dict) -> str:
     return " · ".join(map(str, fields))
 
 
-def match_external_links(
-    activities: list[dict], kind: str, database: str
-) -> list[LinkIssue]:
-    fields = (
-        ["name", "categories", "unit"]
-        if kind == "biosphere"
-        else ["name", "reference product", "location", "unit"]
+def _identity(record, fields):
+    values = (record.get(field) or "" for field in fields)
+    return tuple(
+        tuple(part.lower() for part in value)
+        if isinstance(value, (list, tuple))
+        else value.lower()
+        for value in values
     )
+
+
+def match_external_links(
+    activities: list[dict],
+    kind: str,
+    database: str,
+    *,
+    check_legacy_foreground: bool = False,
+) -> list[LinkIssue]:
+    fields = BIOSPHERE_FIELDS if kind == "biosphere" else TECHNOSPHERE_FIELDS
+    foreground_counts = (
+        Counter(_identity(activity, fields) for activity in activities)
+        if check_legacy_foreground and kind == "technosphere"
+        else {}
+    )
+    issues = []
     pending = defaultdict(list)
     for activity in activities:
         for exchange in activity["exchanges"]:
-            if exchange.get("type") == kind and not exchange.get("input"):
-                pending[activity_hash(exchange, fields=fields)].append(
-                    (activity["name"], exchange)
+            if exchange.get("type") != kind or exchange.get("input"):
+                continue
+            key = _identity(exchange, fields)
+            # Older CLIC exports omitted input IDs when suppliers shared labels.
+            # Keep those exchanges out of background matching.
+            if foreground_counts.get(key, 0) > 1:
+                issues.append(
+                    LinkIssue(
+                        activity["name"],
+                        describe_exchange(exchange),
+                        activity["database"],
+                        "CLIC export omitted a supplier ID for matching foreground activities",
+                        "Prepare smaller batches or ask CLIC to regenerate the export.",
+                    )
                 )
+                continue
+            pending[key].append((activity["name"], exchange))
     if not pending:
-        return []
+        return issues
 
     candidates = defaultdict(list)
     for node in bd.Database(database):
-        key = activity_hash(node, fields=fields)
+        key = _identity(node, fields)
         if key in pending:
             candidates[key].append(node.key)
 
-    issues = []
     for key, exchanges in pending.items():
         matches = candidates[key]
         if len(matches) == 1:

@@ -1,7 +1,7 @@
 """Find ecoinvent export targets supported by the active Brightway databases."""
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 import bw2data as bd
 from bw2data.backends import ActivityDataset

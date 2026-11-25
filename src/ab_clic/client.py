@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from threading import Event, Lock, local
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
@@ -339,10 +339,8 @@ class ClicClient:
         if not response.ok or 300 <= response.status_code < 400:
             detail = ""
             if response.status_code == 422:
-                try:
+                with suppress(requests.exceptions.JSONDecodeError):
                     detail = response.json().get("detail", "")
-                except requests.exceptions.JSONDecodeError:
-                    pass
             raise ClicError(
                 f"CLIC returned HTTP {response.status_code}. {detail}".strip()
             )

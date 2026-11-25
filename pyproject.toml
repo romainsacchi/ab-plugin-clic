@@ -1,13 +1,22 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ab-plugin-clic"
-version = "0.1.0.dev0"
+version = "0.1.0a1"
 description = "Import published CLIC inventories into Activity Browser 3"
 readme = "README.md"
+license = "LGPL-3.0-or-later"
+license-files = ["LICENSE", "COPYING"]
 requires-python = ">=3.11,<3.15"
+keywords = ["activity-browser", "brightway", "lca", "life cycle inventory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "requests>=2.32,<3",
     "bw2data>=4.8,<5",
@@ -15,6 +24,11 @@ dependencies = [
     "qtpy>=2,<3",
     "keyring>=25.6,<26",
 ]
+
+[project.urls]
+Source = "https://github.com/romainsacchi/ab-plugin-clic"
+Issues = "https://github.com/romainsacchi/ab-plugin-clic/issues"
+CLIC = "https://clic.psi.ch/"
 
 [project.entry-points."activity_browser.plugins"]
 ab_clic = "ab_clic.activate:activate"
@@ -24,3 +38,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 ab_clic = ["assets/clic-mark.svg"]
+
+[tool.ruff.lint]
+extend-select = ["B", "I", "SIM", "UP"]

@@ -1,8 +1,8 @@
 """Project-local CLIC job handles and exact import choices."""
 
-from dataclasses import asdict, dataclass
 import json
 import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 

@@ -159,6 +159,50 @@ if __name__ == "__main__":
         raise AssertionError("An unlinked exchange was accepted")
     assert "new" not in bd.databases
 
+    same_concatenation = deepcopy(package)
+    exchange = same_concatenation["activities"][1]["exchanges"][1]
+    exchange.update({"name": "Suppl", "reference product": "yinput"})
+    result = prepare_inventory(same_concatenation, **settings)
+    assert len(result.issues) == 1
+    assert result.issues[0].reason == "No matching node"
+
+    ambiguous_foreground = deepcopy(package)
+    for code in ("older-supplier", "newer-supplier"):
+        ambiguous_foreground["activities"].append(
+            {
+                "name": "Supply",
+                "reference product": "input",
+                "location": "CH",
+                "unit": "kilogram",
+                "code": code,
+                "exchanges": [
+                    {
+                        "type": "production",
+                        "amount": 1,
+                        "input": {"database": "__clic__", "code": code},
+                    }
+                ],
+            }
+        )
+    result = prepare_inventory(ambiguous_foreground, **settings)
+    assert len(result.issues) == 1
+    assert "omitted a supplier ID" in result.issues[0].reason
+    assert "input" not in result.importer.data[1]["exchanges"][1]
+    fixed_export = deepcopy(ambiguous_foreground)
+    fixed_export["package"]["foreground_link_version"] = 1
+    fixed_export["activities"][1]["exchanges"][1]["input"] = {
+        "database": "__clic__",
+        "code": "newer-supplier",
+    }
+    result = prepare_inventory(fixed_export, **settings)
+    assert not result.issues
+    assert result.importer.data[1]["exchanges"][1]["input"] == ("new", "newer-supplier")
+    # A marked export can still intentionally refer to the exact local supplier.
+    del fixed_export["activities"][1]["exchanges"][1]["input"]
+    result = prepare_inventory(fixed_export, **settings)
+    assert not result.issues
+    assert result.importer.data[1]["exchanges"][1]["input"] == ("background", "supply")
+
     bd.Database("duplicates").write(
         {
             ("duplicates", code): {

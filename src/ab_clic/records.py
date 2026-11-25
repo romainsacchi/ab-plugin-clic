@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import bw2data as bd
@@ -28,7 +28,7 @@ def import_record(prepared: PreparedInventory) -> dict:
     ids = manifest.get("included_version_ids") or []
     # CLIC serializes its published activities in included_version_ids order, then appends helpers.
     ids_by_code = (
-        dict(zip((activity["code"] for activity in published), ids))
+        dict(zip((activity["code"] for activity in published), ids, strict=True))
         if len(ids) == len(published)
         else {}
     )
@@ -48,7 +48,9 @@ def import_record(prepared: PreparedInventory) -> dict:
                 "role": (
                     "helper"
                     if code in helpers
-                    else "selected" if code in roots else "supplier"
+                    else "selected"
+                    if code in roots
+                    else "supplier"
                 ),
                 "version_id": version_id,
                 "dataset_slug": detail.get("dataset_slug"),
@@ -75,7 +77,7 @@ def import_record(prepared: PreparedInventory) -> dict:
 
 def complete_import(database: str) -> None:
     bd.databases[database][IMPORT_METADATA]["completed_at"] = datetime.now(
-        timezone.utc
+        UTC
     ).isoformat()
     bd.databases.flush()
 

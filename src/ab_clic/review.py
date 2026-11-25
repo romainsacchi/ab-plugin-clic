@@ -1,7 +1,7 @@
 """Review the CLIC package and link diagnostics before writing to Brightway."""
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 
 from qtpy import QtCore, QtWidgets
 

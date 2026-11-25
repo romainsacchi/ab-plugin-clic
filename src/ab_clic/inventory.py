@@ -106,7 +106,14 @@ def prepare_inventory(
         PreparationStep.MATCH_TECHNOSPHERE,
         f"Matching technosphere exchanges to {technosphere}…",
     )
-    issues.extend(match_external_links(importer.data, "technosphere", technosphere))
+    issues.extend(
+        match_external_links(
+            importer.data,
+            "technosphere",
+            technosphere,
+            check_legacy_foreground=not manifest.get("foreground_link_version"),
+        )
+    )
     on_progress(
         PreparationStep.MATCH_BIOSPHERE, f"Matching biosphere exchanges to {biosphere}…"
     )
