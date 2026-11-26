@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .inventory import PreparedInventory
 
 IMPORT_METADATA = "clic_import"
+IMPORT_HISTORY = "clic_import_history"
 
 
 def import_record(prepared: PreparedInventory) -> dict:
@@ -82,29 +83,52 @@ def complete_import(database: str) -> None:
     bd.databases.flush()
 
 
+def record_append(metadata: dict, record: dict) -> None:
+    first = metadata.get(IMPORT_METADATA)
+    if not first:
+        metadata[IMPORT_METADATA] = record
+        return
+    history = metadata.get(IMPORT_HISTORY, [])
+    if not record.get("replaced_activity_codes"):
+        codes = {activity["code"] for activity in record["activities"]}
+        for entry in reversed((first, *history)):
+            earlier = {**entry, "completed_at": record["completed_at"]}
+            replaced = earlier.pop("replaced_activity_codes", ())
+            if earlier == record:
+                return
+            if codes.intersection(replaced):
+                break
+    metadata[IMPORT_HISTORY] = [*history, record]
+
+
 def imported_versions() -> dict[int, list[str]]:
     """Resolve exact CLIC version IDs against completed databases in this project."""
     by_version = defaultdict(list)
     for name in sorted(bd.databases):
         metadata = bd.databases[name]
-        record = metadata.get(IMPORT_METADATA) or {}
-        if (
-            record.get("schema_version") != 1
-            or not record.get("completed_at")
-            or not metadata.get("number")
-        ):
+        if not metadata.get("number"):
             continue
-        # Only flag activities still present after local edits to the foreground database.
-        database = bd.Database(name)
-        seen = set()
-        for activity in record.get("activities") or []:
-            version_id, code = activity.get("version_id"), activity.get("code")
-            if (
-                version_id
-                and code
-                and version_id not in seen
-                and (name, code) in database
-            ):
-                by_version[version_id].append(name)
-                seen.add(version_id)
+        seen, superseded = set(), set()
+        records = (
+            metadata.get(IMPORT_METADATA) or {},
+            *metadata.get(IMPORT_HISTORY, ()),
+        )
+        database = None
+        for record in reversed(records):
+            if record.get("schema_version") != 1 or not record.get("completed_at"):
+                continue
+            database = database or bd.Database(name)
+            # Only flag activities still present after local edits.
+            for activity in record.get("activities") or []:
+                version_id, code = activity.get("version_id"), activity.get("code")
+                if (
+                    version_id
+                    and code
+                    and code not in superseded
+                    and version_id not in seen
+                    and (name, code) in database
+                ):
+                    by_version[version_id].append(name)
+                    seen.add(version_id)
+            superseded.update(record.get("replaced_activity_codes") or ())
     return dict(by_version)

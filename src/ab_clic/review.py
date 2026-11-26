@@ -121,22 +121,86 @@ class ImportReview(QtWidgets.QDialog):
             tabs.addTab(diagnostics, f"Unresolved links ({len(prepared.issues)})")
             tabs.setCurrentWidget(diagnostics)
 
-        status = QtWidgets.QLabel(
-            "Resolve the listed exchange links before importing."
-            if prepared.issues
-            else f"Ready to write {len(activities)} activities to Brightway."
-        )
+        append = prepared.append_review
+        status = QtWidgets.QLabel()
+        replacements = append.replacements if append is not None else ()
+        if append is not None:
+            changes = (
+                f"{len(append.added)} to add · {len(append.reused)} identical to reuse"
+            )
+            if replacements:
+                changes += f" · {len(replacements)} to replace"
+            summary.addRow(
+                "Destination changes",
+                QtWidgets.QLabel(changes),
+            )
+        if replacements or (append is not None and append.conflicts):
+            names = {
+                activity["code"]: activity["name"]
+                for activity in prepared.importer.data
+            }
+        if replacements:
+            replace_tab = _table(
+                ["Existing activity", "Incoming activity", "Activity code"],
+                [
+                    (item.existing_name, names[item.code], item.code)
+                    for item in replacements
+                ],
+            )
+            tabs.addTab(replace_tab, f"Replacements ({len(replacements)})")
+            if not prepared.issues:
+                tabs.setCurrentWidget(replace_tab)
+        if append is not None and append.conflicts:
+            conflicts = _table(
+                ["Incoming activity", "Activity code"],
+                [(names[code], code) for code in append.conflicts],
+            )
+            tabs.addTab(
+                conflicts, f"Conflicting activity codes ({len(append.conflicts)})"
+            )
+            tabs.setCurrentWidget(conflicts)
+            status.setText(
+                "The destination has different data for the listed activity codes. "
+                "Choose another destination or review the existing activities."
+            )
+        elif prepared.issues:
+            status.setText("Resolve the listed exchange links before importing.")
+        elif replacements:
+            status.setText(
+                "This replaces the listed activity data and outgoing exchanges, including local edits. "
+                "Activity IDs and incoming links are kept."
+            )
+        elif append is not None:
+            status.setText(
+                "Ready to add activities to the destination database."
+                if append.added
+                else "All activities in this package are already present and identical."
+            )
+        else:
+            status.setText(f"Ready to write {len(activities)} activities to Brightway.")
+        status.setWordWrap(True)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
         self.import_button = buttons.addButton(
-            "Import", QtWidgets.QDialogButtonBox.AcceptRole
+            "Replace and import" if replacements else "Import",
+            QtWidgets.QDialogButtonBox.AcceptRole,
         )
-        self.import_button.setEnabled(not prepared.issues)
+        can_import = not prepared.issues and not (append and append.conflicts)
+        self.import_button.setEnabled(can_import and not replacements)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(summary)
         layout.addWidget(status)
         layout.addWidget(tabs, 1)
+        if replacements:
+            confirm = QtWidgets.QCheckBox(
+                "Replace the listed activities and their outgoing exchanges"
+            )
+            confirm.setEnabled(can_import)
+            confirm.toggled.connect(
+                lambda checked: self.import_button.setEnabled(can_import and checked)
+            )
+            layout.addWidget(confirm)
         layout.addWidget(buttons)
 
 

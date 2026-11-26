@@ -14,6 +14,8 @@ class ImportPlan:
     technosphere: str
     biosphere: str
     database: str
+    append: bool = False
+    replace: bool = False
 
     @property
     def version_ids(self) -> tuple[int, ...]:

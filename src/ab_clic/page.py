@@ -16,7 +16,12 @@ from .client import (
     has_noncommercial_license,
 )
 from .details_panel import CandidateDetails
-from .inventory import check_project, prepare_inventory, write_inventory
+from .inventory import (
+    check_project,
+    prepare_inventory,
+    writable_foregrounds,
+    write_inventory,
+)
 from .pending import (
     ImportPlan,
     PendingExport,
@@ -41,6 +46,49 @@ SEARCH_FIELDS = (
     ("Source publication year", "publication_year", "Enter a year, e.g. 2024"),
     ("Inventory reference year", "inventory_reference_year", "Enter a year, e.g. 2024"),
 )
+
+
+def _add_help_row(form, title, field, description):
+    label = QtWidgets.QLabel(title)
+    input_widget = field.focusProxy() or field
+    label.setBuddy(input_widget)
+    input_widget.setAccessibleDescription(description)
+
+    tooltip = f"<p>{description}</p>"
+    label.setToolTip(tooltip)
+    help_button = QtWidgets.QToolButton()
+    help_button.setText("?")
+    help_button.setAccessibleName(f"Help for {title}")
+    help_button.setToolTip(tooltip)
+    help_button.setCheckable(True)
+    help_button.setFocusPolicy(QtCore.Qt.StrongFocus)
+    heading = QtWidgets.QHBoxLayout()
+    heading.setContentsMargins(0, 0, 0, 0)
+    heading.addWidget(label)
+    heading.addStretch()
+    heading.addWidget(help_button)
+    heading_widget = QtWidgets.QWidget()
+    heading_widget.setLayout(heading)
+
+    help_text = QtWidgets.QLabel(description)
+    help_text.setTextFormat(QtCore.Qt.PlainText)
+    help_text.setWordWrap(True)
+    help_text.hide()
+    help_button.toggled.connect(help_text.setVisible)
+    field_layout = QtWidgets.QVBoxLayout()
+    field_layout.addWidget(field)
+    field_layout.addWidget(help_text)
+    form.addRow(heading_widget, field_layout)
+    form.setAlignment(heading_widget, QtCore.Qt.AlignTop)
+    return label
+
+
+class _DestinationPicker(QtWidgets.QComboBox):
+    opening = QtCore.Signal()
+
+    def showPopup(self):
+        self.opening.emit()
+        super().showPopup()
 
 
 class ClicPage(ABAbstractPage):
@@ -168,15 +216,89 @@ class ClicPage(ABAbstractPage):
         background_row.addWidget(self.use_background)
         self.database = QtWidgets.QLineEdit()
         self.database.setPlaceholderText("Use the CLIC package name")
+        self.database.setAccessibleName("New foreground database name")
+        self.destination_mode = QtWidgets.QComboBox()
+        self.destination_mode.addItem("Create a new database", False)
+        self.destination_mode.addItem(
+            "Add to an existing foreground database", "append"
+        )
+        self.destination_mode.addItem("Replace matching activities", "replace")
+        self.existing_database = _DestinationPicker()
+        self.existing_database.setAccessibleName("Existing foreground database")
+        self.existing_database.opening.connect(self._load_destinations)
+        self.destination_status = QtWidgets.QLabel(
+            "Use a foreground database with the sqlite backend. "
+            "If it is locked, double-click its padlock in the Databases pane."
+        )
+        self.destination_status.setWordWrap(True)
+        self.destination_status.hide()
+        destination_field = QtWidgets.QStackedWidget()
+        destination_field.addWidget(self.database)
+        destination_field.addWidget(self.existing_database)
+        self.destination_mode.currentIndexChanged.connect(
+            lambda index: destination_field.setCurrentIndex(int(index > 0))
+        )
+        self.destination_mode.currentIndexChanged.connect(self._load_destinations)
+        self.technosphere.currentTextChanged.connect(self._load_destinations)
+        self.biosphere.currentTextChanged.connect(self._load_destinations)
         self.token = TokenEntry()
         form = QtWidgets.QFormLayout()
-        form.addRow("ecoinvent version", self.target_version)
-        form.addRow("ecoinvent system model", self.target_system)
-        form.addRow("Project technosphere database", self.technosphere)
-        form.addRow("Project biosphere database", self.biosphere)
+        _add_help_row(
+            form,
+            "ecoinvent version",
+            self.target_version,
+            "Enter the release of your local ecoinvent database, for example 3.12. "
+            "CLIC uses this to prepare an export for that release.",
+        )
+        _add_help_row(
+            form,
+            "ecoinvent system model",
+            self.target_system,
+            "Choose Cutoff or Consequential to match your local ecoinvent database. "
+            "Use suggested background can fill in the release and system model.",
+        )
+        _add_help_row(
+            form,
+            "Project technosphere database",
+            self.technosphere,
+            "Select the ecoinvent database in this Brightway project that CLIC should "
+            "link to for supplies such as electricity and materials.",
+        )
+        _add_help_row(
+            form,
+            "Project biosphere database",
+            self.biosphere,
+            "Select the biosphere database linked to your chosen ecoinvent database. "
+            "CLIC uses it to match emissions and resource flows. If available, "
+            "Use suggested background can fill in both database fields.",
+        )
         form.addRow(background_row)
-        form.addRow("New foreground database", self.database)
-        form.addRow("CLIC API token", self.token)
+        form.addRow("Import destination", self.destination_mode)
+        database_help = (
+            "For a new database, enter an unused name or leave this blank to use the "
+            "name suggested by CLIC. To add activities, choose an editable SQLite "
+            "foreground database or an earlier CLIC import."
+        )
+        database_label = _add_help_row(
+            form,
+            "Foreground database",
+            destination_field,
+            database_help,
+        )
+        self.database.setAccessibleDescription(database_help)
+        self.existing_database.setAccessibleDescription(database_help)
+        database_label.setBuddy(self.database)
+        destination_field.currentChanged.connect(
+            lambda _: database_label.setBuddy(destination_field.currentWidget())
+        )
+        form.addRow(self.destination_status)
+        _add_help_row(
+            form,
+            "CLIC API token",
+            self.token,
+            "Click Get your token to open your CLIC account. Create a token with "
+            "inventory download access and paste it here.",
+        )
 
         self.import_button = QtWidgets.QPushButton("Prepare import")
         self.import_button.clicked.connect(self._prepare)
@@ -198,6 +320,7 @@ class ClicPage(ABAbstractPage):
         self.host.signals.project.changed.connect(self._load_databases)
         self.host.signals.database.written.connect(self._load_databases)
         self.host.signals.database.deleted.connect(self._load_databases)
+        self.host.signals.database_read_only_changed.connect(self._load_destinations)
         self._load_databases()
 
     def _load_databases(self, *_):
@@ -214,14 +337,36 @@ class ClicPage(ABAbstractPage):
                 picker.setCurrentText(selected if selected in names else "")
         self.background_suggestions = suggest_backgrounds()
         if changed_project:
+            self.existing_database.clear()
             self.target_version.clear()
             self.target_system.setCurrentIndex(0)
             if len(self.background_suggestions) == 1:
                 self._use_background()
         self._refresh_background_status()
+        self._load_destinations()
         self._refresh_pending()
         self.imported = imported_versions()
         self._sync_selection()
+
+    def _load_destinations(self, *_):
+        if not self.destination_mode.currentData():
+            self.destination_status.hide()
+            return
+        picker = self.existing_database
+        selected = picker.currentData()
+        names = writable_foregrounds(
+            self.technosphere.currentText(), self.biosphere.currentText()
+        )
+        picker.clear()
+        picker.addItem(
+            "Choose an existing database"
+            if names
+            else "No writable SQLite foreground databases"
+        )
+        for name in names:
+            picker.addItem(name, name)
+        picker.setCurrentIndex(max(0, picker.findData(selected)))
+        self.destination_status.setVisible(not names)
 
     def _background_suggestion(self):
         name = self.technosphere.currentText()
@@ -474,14 +619,27 @@ class ClicPage(ABAbstractPage):
             return
         technosphere = self.technosphere.currentText()
         biosphere = self.biosphere.currentText()
-        database = self.database.text().strip()
+        mode = self.destination_mode.currentData()
+        database = (
+            self.existing_database.currentData() or ""
+            if mode
+            else self.database.text().strip()
+        )
         target = {
             "family": "ecoinvent",
             "version": self.target_version.text().strip(),
             "system_model": self.target_system.currentData() or "",
         }
         self._run_import(
-            ImportPlan(versions, target, technosphere, biosphere, database)
+            ImportPlan(
+                versions,
+                target,
+                technosphere,
+                biosphere,
+                database,
+                append=bool(mode),
+                replace=mode == "replace",
+            )
         )
 
     def _pending_path(self):
@@ -503,9 +661,12 @@ class ClicPage(ABAbstractPage):
                 if len(plan.versions) == 1
                 else f"{len(plan.versions)} selected versions"
             )
-            menu = self.pending_menu.addMenu(
-                f"{name} · {plan.target['version']} {plan.target['system_model']}"
-            )
+            title = f"{name} · {plan.target['version']} {plan.target['system_model']}"
+            if plan.replace:
+                title += f" · Replace matching in {plan.database}"
+            elif plan.append:
+                title += f" · Add to {plan.database}"
+            menu = self.pending_menu.addMenu(title)
             resume = menu.addAction("Resume preparation")
             resume.triggered.connect(
                 lambda _, export=entry: self._run_import(export.plan, export.status_url)
@@ -538,7 +699,9 @@ class ClicPage(ABAbstractPage):
             return
         path = self._pending_path()
         try:
-            check_project(project, plan.database, technosphere, biosphere)
+            check_project(
+                project, plan.database, technosphere, biosphere, append=plan.append
+            )
             choose_target(
                 technosphere,
                 biosphere,
@@ -585,13 +748,16 @@ class ClicPage(ABAbstractPage):
                     technosphere=technosphere,
                     biosphere=biosphere,
                     database=plan.database,
+                    append=plan.append,
+                    replace=plan.replace,
                     expected_target=plan.target,
                     on_progress=on_progress,
                 )
 
-        with self.host.protect_databases(
-            [technosphere, biosphere], reason="Preparing CLIC import"
-        ):
+        protected = [technosphere, biosphere]
+        if plan.append:
+            protected.append(plan.database)
+        with self.host.protect_databases(protected, reason="Preparing CLIC import"):
             try:
                 prepared = run_preparation(self, prepare)
             except ExportDeferred:
@@ -612,7 +778,12 @@ class ClicPage(ABAbstractPage):
             # registration and flush. Keep that part on the Qt GUI thread.
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             try:
-                write_inventory(prepared)
+                write_inventory(
+                    prepared,
+                    confirm_replacement=bool(
+                        prepared.append_review and prepared.append_review.replacements
+                    ),
+                )
             except Exception as exc:
                 error = str(exc)
             else:
@@ -626,9 +797,20 @@ class ClicPage(ABAbstractPage):
             self._forget_export(plan)
             self.imported = imported_versions()
             self._sync_selection()
-            self._message(
-                f"Imported {len(prepared.importer.data)} activities into {prepared.database}."
-            )
+            if (review := prepared.append_review) and review.replacements:
+                self._message(
+                    f"Replaced {len(review.replacements)}, added {len(review.added)}, "
+                    f"and reused {len(review.reused)} activities in {prepared.database}."
+                )
+            elif review:
+                self._message(
+                    f"Added {len(review.added)} and reused {len(review.reused)} "
+                    f"activities in {prepared.database}."
+                )
+            else:
+                self._message(
+                    f"Imported {len(prepared.importer.data)} activities into {prepared.database}."
+                )
 
     def _confirm(self, prepared):
         return ImportReview(prepared, self).exec() == QtWidgets.QDialog.Accepted

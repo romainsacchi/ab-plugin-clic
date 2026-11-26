@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ab-plugin-clic"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Import published CLIC inventories into Activity Browser 3"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -21,6 +21,7 @@ dependencies = [
     "requests>=2.32,<3",
     "bw2data>=4.8,<5",
     "bw2io>=0.9.17,<1",
+    "peewee>=4.0.1",
     "qtpy>=2,<3",
     "keyring>=25.6,<26",
 ]

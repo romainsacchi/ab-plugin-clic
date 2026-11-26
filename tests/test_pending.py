@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -41,3 +42,37 @@ class PendingExportsTests(unittest.TestCase):
             self.assertEqual(
                 pending_exports(path), [PendingExport(other, "/api/jobs/b/")]
             )
+
+    def test_append_destination_is_saved_and_legacy_jobs_default_to_new(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.json"
+            export = PendingExport(
+                ImportPlan(
+                    [{"id": 1}], {}, "background", "flows", "foreground", append=True
+                ),
+                "/api/jobs/a/",
+            )
+            save_pending(path, export)
+            self.assertEqual(pending_exports(path), [export])
+            payload = json.loads(path.read_text())
+            del payload[0]["plan"]["append"]
+            path.write_text(json.dumps(payload))
+            self.assertFalse(pending_exports(path)[0].plan.append)
+
+    def test_replacement_mode_round_trips_for_pending_exports(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.json"
+            item = PendingExport(
+                ImportPlan(
+                    [{"id": 1}],
+                    {},
+                    "background",
+                    "flows",
+                    "foreground",
+                    append=True,
+                    replace=True,
+                ),
+                "/api/jobs/a/",
+            )
+            save_pending(path, item)
+            self.assertEqual(pending_exports(path), [item])

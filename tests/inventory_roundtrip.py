@@ -1,14 +1,17 @@
 """Import a synthetic CLIC package in the temporary project used by unittest."""
 
 from copy import deepcopy
+from unittest.mock import patch
 
 import bw2calc as bc
 import bw2data as bd
+from bw2data.parameters import ParameterizedExchange
+from bw2data.search import IndexManager
 from bw2data.signals import on_database_write
 
 from ab_clic.background import choose_target, suggest_backgrounds
-from ab_clic.inventory import prepare_inventory, write_inventory
-from ab_clic.records import IMPORT_METADATA, imported_versions
+from ab_clic.inventory import prepare_inventory, writable_foregrounds, write_inventory
+from ab_clic.records import IMPORT_HISTORY, IMPORT_METADATA, imported_versions
 from ab_clic.review import package_activities
 
 
@@ -121,6 +124,228 @@ def make_package():
         "conversion": {"warnings": [{"message": "Sample conversion warning"}]},
         "activities": activities,
     }
+
+
+def check_append(package, settings):
+    database = bd.Database("new")
+    root, helper = database.get("root"), database.get("helper")
+    original_ids = root.id, helper.id, next(iter(root.technosphere())).id
+    dependent = bd.Database("dependent")
+    dependent.write(
+        {
+            ("dependent", "model"): {
+                "name": "External model",
+                "unit": "kilogram",
+                "location": "CH",
+                "exchanges": [{"type": "technosphere", "amount": 1, "input": root.key}],
+            }
+        }
+    )
+    bd.calculation_setups["CLIC model"] = {"inv": [{root.id: 1}], "ia": []}
+    bd.Database("empty").register(read_only=False, searchable=False)
+    bd.Database("locked").register(read_only=True)
+    bd.Database("Other legacy database").register()
+    bd.databases["biosphere"]["read_only"] = False
+    bd.databases["new"]["read_only"] = True
+    assert writable_foregrounds("background", "biosphere") == ["empty"]
+    del bd.databases["new"]["read_only"]
+    assert writable_foregrounds("background", "biosphere") == ["empty", "new"]
+
+    additional = deepcopy(package)
+    additional["package"].update(
+        root_version_ids=[43],
+        included_version_ids=[43],
+        focal_activity_codes=["second"],
+    )
+    changed = additional["activities"][0]
+    changed.update(code="second", name="Second inventory")
+    changed["exchanges"][0]["input"]["code"] = "second"
+    changed["exchanges"][0]["output"] = ("new", "root")
+    additional["activities"][1]["exchanges"].reverse()
+    append_settings = {**settings, "append": True}
+    prepared = prepare_inventory(additional, **append_settings)
+    assert prepared.append_review.added == ("second",)
+    assert prepared.append_review.reused == ("helper",)
+    assert not prepared.append_review.conflicts
+
+    helper["name"] = "Locally edited helper"
+    helper.save()
+    try:
+        write_inventory(prepared)
+    except ValueError as error:
+        assert "destination database changed" in str(error)
+    else:
+        raise AssertionError("Accepted a local edit after review")
+    conflicting = prepare_inventory(additional, **append_settings)
+    assert conflicting.append_review.conflicts == ("helper",)
+    try:
+        write_inventory(conflicting)
+    except ValueError as error:
+        assert "activity code conflicts" in str(error)
+    else:
+        raise AssertionError("Accepted a conflicting activity code")
+    assert ("new", "second") not in database
+    helper["name"] = "helper"
+    helper.save()
+
+    before = deepcopy(bd.databases["new"])
+    add_to_index = IndexManager.add_datasets
+
+    def fail_after_index_write(index, datasets):
+        add_to_index(index, datasets)
+        raise OSError("Simulated index failure")
+
+    with patch.object(IndexManager, "add_datasets", fail_after_index_write):
+        try:
+            write_inventory(prepared)
+        except OSError as error:
+            assert "Simulated index failure" in str(error)
+        else:
+            raise AssertionError("Failed write was accepted")
+    assert bd.databases["new"] == before
+    assert ("new", "second") not in database
+    assert not database.search("Second inventory")
+
+    write_inventory(prepared)
+    root, helper = database.get("root"), database.get("helper")
+    assert (root.id, helper.id, next(iter(root.technosphere())).id) == original_ids
+    assert next(iter(dependent.get("model").technosphere())).input.id == root.id
+    assert bd.calculation_setups["CLIC model"]["inv"] == [{root.id: 1}]
+    assert database.search("Second inventory")[0].key == ("new", "second")
+    assert imported_versions() == {42: ["new"], 43: ["new"]}
+    assert bd.databases["new"]["number"] == 3
+    assert "read_only" not in bd.databases["new"]
+    second = database.get("second")
+    assert len(list(root.production())) == len(list(second.production())) == 1
+    assert next(iter(second.technosphere())).input.id == helper.id
+    lca = bc.LCA({second: 1})
+    lca.lci()
+    assert abs(float(lca.inventory.sum()) - 11) < 1e-9
+
+    retry = prepare_inventory(additional, **append_settings)
+    assert not retry.append_review.added
+    assert retry.append_review.reused == ("second", "helper")
+    write_inventory(retry)
+    assert len(bd.databases["new"][IMPORT_HISTORY]) == 1
+
+    empty = prepare_inventory(package, **{**append_settings, "database": "empty"})
+    assert empty.append_review.added == ("root", "helper")
+    write_inventory(empty)
+    assert imported_versions() == {42: ["empty", "new"], 43: ["new"]}
+
+
+def check_replacement(package, settings):
+    bd.projects.set_current("CLIC replacement integration")
+    make_background()
+    settings = {**settings, "project": bd.projects.current, "database": "model"}
+    write_inventory(prepare_inventory(package, **settings))
+    database = bd.Database("model")
+    root, helper = database.get("root"), database.get("helper")
+    root_id, helper_id = root.id, helper.id
+    old_biosphere = next(iter(root.biosphere()))
+    bd.parameters.new_activity_parameters(
+        [{"name": "factor", "amount": 2, "database": "model", "code": "root"}],
+        "root parameters",
+    )
+    ParameterizedExchange.create(
+        exchange=old_biosphere.id, group="root parameters", formula="factor"
+    )
+    bd.calculation_setups["Existing setup"] = {"inv": [{root_id: 1}], "ia": []}
+    dependent = helper.new_exchange(input=root.key, type="technosphere", amount=0)
+    dependent.save()
+
+    incoming = deepcopy(package)
+    incoming["package"].update(
+        root_version_ids=[46, 47],
+        included_version_ids=[46, 47],
+        focal_activity_codes=["root", "third"],
+    )
+    replacement = incoming["activities"][0]
+    replacement["name"] = "Updated inventory"
+    replacement["exchanges"][1]["amount"] = 3
+    replacement["exchanges"].pop()
+    third = deepcopy(replacement)
+    third.update(code="third", name="Third inventory")
+    third["exchanges"][0]["input"]["code"] = "third"
+    third["exchanges"][1]["input"]["code"] = "root"
+    third["provenance"] = {"dataset_slug": "third", "semantic_version": "1.0.0"}
+    incoming["activities"].insert(1, third)
+    incoming["activities"][2]["exchanges"].append(
+        {
+            "type": "technosphere",
+            "amount": 0,
+            "input": {"database": "__clic__", "code": "root"},
+        }
+    )
+
+    replace_settings = {**settings, "append": True, "replace": True}
+    prepared = prepare_inventory(incoming, **replace_settings)
+    assert prepared.append_review.added == ("third",)
+    assert prepared.append_review.reused == ("helper",)
+    assert not prepared.append_review.conflicts
+    assert [item.code for item in prepared.append_review.replacements] == ["root"]
+    try:
+        write_inventory(prepared)
+    except ValueError as error:
+        assert "Confirm the listed replacements" in str(error)
+    else:
+        raise AssertionError("Replaced an activity without confirmation")
+    root["comment"] = "Edit after preview"
+    root.save()
+    try:
+        write_inventory(prepared, confirm_replacement=True)
+    except ValueError as error:
+        assert "destination database changed" in str(error)
+    else:
+        raise AssertionError("Replaced an activity edited after preview")
+    assert database.get("root")["comment"] == "Edit after preview"
+
+    prepared = prepare_inventory(incoming, **replace_settings)
+    before = deepcopy(bd.databases["model"])
+    update_index = IndexManager.update_dataset
+
+    def fail_after_index_update(index, activity):
+        update_index(index, activity)
+        if activity["name"] == "Updated inventory":
+            raise OSError("Simulated replacement index failure")
+
+    with patch.object(IndexManager, "update_dataset", fail_after_index_update):
+        try:
+            write_inventory(prepared, confirm_replacement=True)
+        except OSError as error:
+            assert "Simulated replacement index failure" in str(error)
+        else:
+            raise AssertionError("Failed replacement was accepted")
+    assert database.get("root")["name"] == "root"
+    assert bd.databases["model"] == before
+    assert ("model", "third") not in database
+    assert not database.search("Updated inventory")
+    assert ParameterizedExchange.get_or_none(exchange=old_biosphere.id)
+    assert old_biosphere.id in [
+        exchange.id for exchange in database.get("root").biosphere()
+    ]
+
+    write_inventory(prepared, confirm_replacement=True)
+    root, helper = database.get("root"), database.get("helper")
+    assert (root.id, helper.id) == (root_id, helper_id)
+    assert bd.calculation_setups["Existing setup"]["inv"] == [{root_id: 1}]
+    assert (
+        next(edge for edge in helper.technosphere() if edge.id == dependent.id).input.id
+        == root_id
+    )
+    assert next(iter(database.get("third").technosphere())).input.id == root_id
+    assert not list(root.biosphere())
+    assert not ParameterizedExchange.get_or_none(exchange=old_biosphere.id)
+    assert next(iter(root.technosphere()))["amount"] == 3
+    assert database.search("Updated inventory")[0].id == root_id
+    assert imported_versions() == {46: ["model"], 47: ["model"]}
+    lca = bc.LCA({root: 1})
+    lca.lci()
+    assert abs(float(lca.inventory.sum()) - 18) < 1e-9
+    retry = prepare_inventory(incoming, **replace_settings)
+    assert retry.append_review.reused == ("root", "third", "helper")
+    write_inventory(retry)
+    assert len(bd.databases["model"][IMPORT_HISTORY]) == 1
 
 
 if __name__ == "__main__":
@@ -271,5 +496,7 @@ if __name__ == "__main__":
     assert not imported_versions()
     bd.projects.set_current(settings["project"])
     assert imported_versions() == {42: ["new"]}
+    check_append(package, settings)
     bd.Database("new").get("root").delete()
-    assert not imported_versions()
+    assert imported_versions() == {42: ["empty"], 43: ["new"]}
+    check_replacement(package, settings)

@@ -4,18 +4,18 @@ Browse published life cycle inventories from the [Curated Life cycle Inventory C
 
 ## Install from PyPI
 
-Install [`ab-plugin-clic` 0.1.0a1](https://pypi.org/project/ab-plugin-clic/0.1.0a1/) and the pinned [plugin-enabled Activity Browser build](https://github.com/LCA-ActivityBrowser/activity-browser/tree/aa164283a3a171ccdeed7fba1fc431a89b9d5c12) in the same Python environment. Python 3.12 on macOS is the tested setup. Activity Browser 3.0.0 and its standalone installers lack the plugin loader.
+Install [`ab-plugin-clic` 0.1.0a2](https://pypi.org/project/ab-plugin-clic/0.1.0a2/) and the pinned [plugin-enabled Activity Browser build](https://github.com/LCA-ActivityBrowser/activity-browser/tree/aa164283a3a171ccdeed7fba1fc431a89b9d5c12) in the same Python environment. Python 3.12 on macOS is the tested setup. Activity Browser 3.0.0 and its standalone installers lack the plugin loader.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install \
   'activity-browser @ git+https://github.com/LCA-ActivityBrowser/activity-browser.git@aa164283a3a171ccdeed7fba1fc431a89b9d5c12' \
-  'ab-plugin-clic==0.1.0a1'
+  'ab-plugin-clic==0.1.0a2'
 activity-browser
 ```
 
-If you already have the pinned Activity Browser build, activate its environment and run `python -m pip install 'ab-plugin-clic==0.1.0a1'`.
+If you already have the pinned Activity Browser build, activate its environment and run `python -m pip install 'ab-plugin-clic==0.1.0a2'`.
 
 In Activity Browser, open **Settings → Plugins**, enable **CLIC**, save, and restart. Then open **Plugins → CLIC → Browse and import**.
 
@@ -25,11 +25,17 @@ In Activity Browser, open **Settings → Plugins**, enable **CLIC**, save, and r
 2. Check the datasets to import. The **Selected versions** list follows you across pages and searches. **Exclude non-commercial licenses** hides versions with Creative Commons NonCommercial terms and removes them from the selection. Datasets with undisclosed licenses stay visible. [CLIC license guide](https://clic.psi.ch/licenses/)
 3. Choose the local technosphere and biosphere databases and the matching ecoinvent target. The plugin suggests a pair when it recognizes the ecoinvent release and finds one linked biosphere database.
 4. Select **Get your token** to create a CLIC API token with inventory download access. The plugin remembers it in your operating system’s credential store when available. Use **Forget token** to remove it.
-5. Select **Prepare import** to request an export for up to 100 selected versions and their connected suppliers. Review the included datasets, licenses, conversion warnings, and any unresolved links. Select **Import** to write a new foreground database.
+5. Under **Import destination**, choose **Create a new database** (the default), or **Add to an existing foreground database** and select a writable classic SQLite foreground database. Select **Prepare import** to request an export for up to 100 selected versions and their connected suppliers. Review the included datasets, licenses, conversion warnings, and any unresolved links. When adding to an existing database, the review counts new and identical activities. If the same activity code has different data, choose another destination or review the existing activity before importing.
+
+Earlier CLIC databases without a saved read-only setting can also receive imports. If you explicitly locked a database, double-click its padlock in Activity Browser’s **Databases** pane to make it editable, then reopen the destination dropdown.
+
+Use **Replace matching activities** to update activities whose Brightway codes match the incoming package. The review lists the replacements and asks you to confirm them. The import keeps their activity IDs and incoming links and replaces their data and outgoing exchanges. It also adds new activities and reuses identical ones.
 
 The catalog shows the latest published version of each dataset. Click a column header to sort the current page, drag its borders to resize it, or right-click the header to filter across pages.
 
-If CLIC is still preparing an export, select **Continue later** and resume through **Pending exports** in the same Brightway project. After import, Activity Browser’s **Description** tab shows the available CLIC metadata for each version, including publication details and technology readiness level. The new database stores an import receipt in its Brightway metadata under `clic_import`.
+Hover over an import field label for guidance, or activate its **?** button to keep the help open as you edit.
+
+If CLIC is still preparing an export, select **Continue later** and resume through **Pending exports** in the same Brightway project. After import, Activity Browser’s **Description** tab shows the available CLIC metadata for each version, including publication details and technology readiness level. The destination database stores its first receipt in Brightway metadata under `clic_import` and any subsequent receipts under `clic_import_history`.
 
 ## Backgrounds and unresolved links
 
@@ -58,7 +64,7 @@ python -m twine check --strict dist/*
 
 ## Releases
 
-Use a Git tag that matches the version in `pyproject.toml`, such as `v0.1.0a1`.
+Use a Git tag that matches the version in `pyproject.toml`, such as `v0.1.0a2`.
 Run **Publish to PyPI** manually on the tag to build and check both distributions.
 Publishing the corresponding draft GitHub release starts the PyPI upload workflow.
 
